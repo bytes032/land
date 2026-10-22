@@ -26,11 +26,18 @@ const File = ".land.yaml"
 type Config struct {
 	Version string  `yaml:"version"` // the pinned land version, bare semver
 	Trunk   string  `yaml:"trunk"`
+	Push    string  `yaml:"push"` // PushAfterCheck or PushFirst
 	Message Message `yaml:"message"`
 	Gate    Gate    `yaml:"gate"`
 	Box     Box     `yaml:"box"`
 	Stages  Stages  `yaml:"stages"`
 }
+
+// Push orders: when a landing pushes its commit.
+const (
+	PushAfterCheck = "after-check" // once its check passed; the default
+	PushFirst      = "first"       // before its check, marked pending until the check after the push ends
+)
 
 // Message is what a landing's commit message must hold.
 type Message struct {
@@ -129,10 +136,10 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// Parse reads a .land.yaml's bytes, refusing keys land doesn't know, so a misspelled or removed key is an error
-// rather than silently ignored. It doesn't validate the values; Load does.
+// Parse reads a .land.yaml's bytes over the defaults of the keys it may leave out, refusing keys land doesn't know, so
+// a misspelled or removed key is an error rather than silently ignored. It doesn't validate the values; Load does.
 func Parse(data []byte) (*Config, error) {
-	var c Config
+	c := Config{Push: PushAfterCheck}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
@@ -177,6 +184,8 @@ func (c *Config) check() error {
 		return errors.New("gate.timeout is required: a positive duration such as 30m")
 	case c.Gate.Unverified != "fail" && c.Gate.Unverified != "skip":
 		return fmt.Errorf("gate.unverified is %q; it must be fail or skip", c.Gate.Unverified)
+	case c.Push != PushAfterCheck && c.Push != PushFirst:
+		return fmt.Errorf("push is %q; it must be %s or %s", c.Push, PushAfterCheck, PushFirst)
 	case c.Box.Type == "":
 		return errors.New("box.type is required: the Hetzner server type boxes are created with, such as cpx42")
 	case len(c.Stages.Check) == 0:

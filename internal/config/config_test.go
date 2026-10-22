@@ -63,13 +63,15 @@ func TestLoadReadsAValidFile(t *testing.T) {
 		len(c.Stages.Check) != 2 || len(c.Stages.Regenerate) != 2 {
 		t.Fatalf("config = %+v", c)
 	}
-	for _, other := range []string{"version: 1.2.3-rc.1+build.5", "unverified: skip", "regenerate: []"} {
+	for _, other := range []string{"version: 1.2.3-rc.1+build.5", "unverified: skip", "regenerate: []", "push: first", "push: after-check"} {
 		yaml := valid
 		switch {
 		case strings.HasPrefix(other, "version"):
 			yaml = strings.Replace(yaml, "version: 0.1.0", other, 1)
 		case strings.HasPrefix(other, "unverified"):
 			yaml = strings.Replace(yaml, "unverified: fail", other, 1)
+		case strings.HasPrefix(other, "push"):
+			yaml = other + "\n" + yaml
 		default:
 			yaml = valid[:strings.Index(valid, "  regenerate:")] + "  " + other + "\n"
 		}
@@ -91,6 +93,7 @@ func TestLoadNamesTheKeyAtFault(t *testing.T) {
 		{"timeout: 30m", "timeout: -1m", "gate.timeout"},
 		{"timeout: 30m", "timeout: soon", "line 4"},
 		{"unverified: fail", "unverified: pass", "gate.unverified"},
+		{"trunk: main", "trunk: main\npush: later", `push is "later"`},
 		{"gate: {timeout: 30m, unverified: fail}", "gate: {timeout: 30m}", "gate.unverified"},
 		{"box: {type: cpx42}\n", "", "box.type"},
 		{"box: {type: cpx42}", "box: {env: {A: b}}", "box.type"},

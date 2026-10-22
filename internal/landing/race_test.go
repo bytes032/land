@@ -202,6 +202,77 @@ func TestALostRaceWithADerivedConflictIsCheckedBeforeThePush(t *testing.T) {
 	}
 }
 
+// Under push: first, a landing is regenerated on the box, then pushed before its check starts, marked pending, and
+// the check after the push sets its final mark: success when it passes; failure when it fails, with a commit comment
+// the mark links to. Under the default, after-check, the check runs while the trunk is where the landing started, and
+// the landing is pushed only once it passed, marked success alone.
+func TestPushFirstPushesBeforeTheCheck(t *testing.T) {
+	for name, c := range map[string]struct {
+		push  string // the .land.yaml line, "" for the default
+		run   string // the check, once it logged where the trunk is
+		marks []forge.State
+	}{
+		"after-check, the default": {run: "true", marks: []forge.State{forge.Success}},
+		"first, passing":           {push: "push: first\n", run: "true", marks: []forge.State{forge.Success, forge.Pending}},
+		"first, failing":           {push: "push: first\n", run: "echo broken; exit 3", marks: []forge.State{forge.Failure, forge.Pending}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			stages := w.stages()
+			stages.Check[0].Run = "git -C '" + w.remote + "' rev-parse main >> '" + w.checks + "'; " + c.run
+			stages.Regenerate = []config.Regenerate{{Kind: config.Lockfile, Path: "deps.lock", Run: "{ echo locked; cat deps.txt; } > deps.lock"}}
+			started := w.push(t, map[string]string{config.File: c.push + landYAML(stages)})
+			commit(t, w.agent, "bump", map[string]string{"deps.txt": "v2\n", "deps.lock": "stale\n"})
+			err := w.land(t, unchecked{})
+			if failing := c.marks[0] == forge.Failure; failing != (err != nil) || failing && !strings.Contains(err.Error(), "main is red there") {
+				t.Fatalf("land returned %v", err)
+			}
+			pushed := w.trunk(t)
+			if lock := git(t, w.remote, "show", "main:deps.lock"); lock != "locked\nv2" {
+				t.Errorf("the pushed deps.lock is %q, want it regenerated before the push", lock)
+			}
+			want := pushed
+			if c.push == "" {
+				want = started
+			}
+			if trunks := strings.Fields(read(t, w.checks)); !slices.Equal(trunks, []string{want}) {
+				t.Errorf("the check started with the trunk at %q, want at %s", trunks, want)
+			}
+			if states := w.states(t, pushed); !slices.Equal(states, c.marks) {
+				t.Errorf("the pushed commit's marks are %q, newest first; want %q", states, c.marks)
+			}
+			if comments := w.forge.Comments(pushed); c.marks[0] == forge.Failure && (len(comments) != 1 || !strings.Contains(comments[0], "broken") || w.newest(t, pushed).TargetURL == "") {
+				t.Errorf("the failure's comments are %q, linked as %q; want one, linked", comments, w.newest(t, pushed).TargetURL)
+			}
+		})
+	}
+}
+
+// Under push: first, a lost race whose only conflict is a derived file pushes the regenerated commit at once too, with
+// no check before either push, and checks it after the push.
+func TestPushFirstChecksADerivedConflictAfterThePush(t *testing.T) {
+	w := newWorld(t)
+	stages := w.stages()
+	stages.Regenerate = regenerations(w, filepath.Join(t.TempDir(), "untouched"))
+	w.push(t, map[string]string{config.File: "push: first\n" + landYAML(stages), "x.src": "x\n", "y.src": "y\n", "all.out": "x\ny\n"})
+	git(t, w.agent, "pull", "-q", "--ff-only", "origin", "main")
+	commit(t, w.agent, "agent's", map[string]string{"y.src": "Y\n", "all.out": "x\nY\n"})
+	w.loseRaces(t, map[string]string{"x.src": "X\n", "all.out": "X\ny\n"})
+	if err := w.land(t, unchecked{}); err != nil {
+		t.Fatal(err)
+	}
+	pushed := w.trunk(t)
+	if all := git(t, w.remote, "show", "main:all.out"); all != "X\nY" {
+		t.Errorf("the pushed all.out is %q, want it regenerated from both sides", all)
+	}
+	if checked, tree := strings.Fields(read(t, w.checks)), git(t, w.remote, "rev-parse", "main^{tree}"); !slices.Equal(checked, []string{tree}) {
+		t.Errorf("the box checked trees %q, want the pushed %s alone", checked, tree)
+	}
+	if states := w.states(t, pushed); !slices.Equal(states, []forge.State{forge.Success, forge.Pending}) {
+		t.Errorf("the pushed commit's marks are %q, newest first; want pending, then success", states)
+	}
+}
+
 // A lost race that conflicts in a lockfile, or in a file with no regenerate entry, stops land with nothing pushed or
 // marked, the worktree clean.
 func TestAConflictInALostRaceStopsLand(t *testing.T) {

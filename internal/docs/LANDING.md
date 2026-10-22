@@ -79,13 +79,18 @@ Write the commit message to a file, then run `land --message FILE`.
 - When it passes, land pushes the commit and marks it `success`, and your worktree ends at it. A failure, or a box that
   stopped before a verdict, pushes nothing and leaves your worktree at the squashed commit, before any regeneration:
   fix a failure, or after the box just land again, which needs no new review.
+- **The order,** `push:` in `.land.yaml`: `after-check`, the default, pushes only once the check passed, as above.
+  `first` pushes the regenerated commit at once, marked `pending`, then checks it and sets the final mark, as after a
+  lost race: the trunk is red now and then, but nobody waits on the check to see your commit, and new work still
+  branches from the green commit.
 - **A lost race:** the trunk moved while you landed, so the push is refused. land rebases onto it and pushes again at
   once, marked `pending`, then checks the pushed commit and sets the final mark. When derived files conflicted, they
-  are regenerated and checked before the push instead. Any other conflict stops land (see Conflicts).
+  are regenerated and, under `after-check`, checked before the push instead. Any other conflict stops land (see
+  Conflicts).
 - **The marks:** `success`, the check passed. `failure`, a check failed at this commit: a commit comment, linked from
   the mark, lists each failed check's name, command, exit and the end of its log. `error`, no verdict: the box, the
-  connection, Hetzner, crabbox or `prepare` failed, and the mark names where; it never blames the commit. `pending`, a
-  lost race's check is running.
+  connection, Hetzner, crabbox or `prepare` failed, and the mark names where; it never blames the commit. `pending`,
+  the check after the push is running.
 
 ## CI
 
