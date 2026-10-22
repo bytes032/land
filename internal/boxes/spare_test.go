@@ -508,3 +508,30 @@ func TestABoxCommandMovesItsHeldBoxsDeadlineOn(t *testing.T) {
 		t.Fatalf("after a box command 50 minutes into its first paid hour, the deadline is %d s after creation, want %d", got, 2*3600-300)
 	}
 }
+
+// A box whose /run forbids executing files (Ubuntu 24.04 mounts it noexec) still runs its own scripts: rearm after a
+// box command and in a takeover, and the self-delete from its timer, each through bash, never executed directly.
+func TestABoxsScriptsRunWhereExecutingThemIsForbidden(t *testing.T) {
+	newFake(t)
+	created := time.Now().Add(-50 * time.Minute).Truncate(time.Second)
+	p, _, _ := testPool(t)
+	at(t, p, created, time.Now())
+	b := claimed(t, p, "")
+	for _, script := range []string{"rearm", "self-delete"} {
+		if err := os.Chmod(filepath.Join(runDir, script), 0o600); err != nil { // as a noexec mount refuses them
+			t.Fatal(err)
+		}
+	}
+	write(t, filepath.Join(runDir, "deadline"), strconv.FormatInt(time.Now().Unix()-1, 10)+"\n")
+	run(t, b, "true")
+	if got := readDeadline(t) - created.Unix(); got != 2*3600-300 {
+		t.Fatalf("after a box command, the deadline is %d s after creation, want %d: rearm didn't run", got, 2*3600-300)
+	}
+	timer, err := os.ReadFile(filepath.Join(os.Getenv("UNITS"), "land-self-delete.timer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("sh", "-c", strings.TrimSpace(string(timer))).CombinedOutput(); err != nil {
+		t.Fatalf("the timer's command %q fails on a script it may not execute: %v\n%s", timer, err, out)
+	}
+}
