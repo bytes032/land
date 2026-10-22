@@ -47,7 +47,7 @@ func TestABoxIsAFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.setServer(t, leases[off], "off")
-	if err := spare.snapshot(t.Context()); err != nil {
+	if err := spare.snapshot(t.Context(), false); err != nil {
 		t.Fatalf("%v\n%s", err, spare.stderr)
 	}
 	p, _, stderr := testPool(t)

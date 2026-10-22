@@ -37,7 +37,8 @@ Your box runs every build and test; your Mac only edits files and runs git. With
   command, unless something is connected to it then (a command still running, a tunnel open), which keeps it another
   hour. Your next box command after that claims a spare or a new box, with cold build caches.
 - New boxes boot the repository's newest snapshot. With none, the claim stops and names `land boxes snapshot`, which
-  builds one at the green commit, with that commit's `.land.yaml`, whatever your worktree holds.
+  builds one at the green commit, with that commit's `.land.yaml`, whatever your worktree holds. `--head` builds it at
+  your HEAD commit instead, with its `.land.yaml`: for the repository's first snapshot, before its adoption lands.
 - At Hetzner's server limit, a claim says once who holds the repository's boxes, then retries every 30 s for up to 3 h.
 
 ## Ready to land

@@ -374,8 +374,8 @@ func TestABoxWithoutItsSelfDeleteIsNoSpare(t *testing.T) {
 }
 
 // greenWorld is a worktree of acme/api cloned from a remote whose trunk's green commit, marked success, holds the
-// configuration trunk, and whose tip follows it; with branch, the worktree holds a commit of its own after the tip,
-// holding that configuration. Its pool's forge holds the mark.
+// configuration trunk, none when it is empty, and whose tip follows it; with branch, the worktree holds a commit of its
+// own after the tip, holding that configuration. Its pool's forge holds the mark.
 func greenWorld(t *testing.T, trunk, branch string) (p *pool, green string) {
 	t.Helper()
 	dir := realDir(t)
@@ -385,7 +385,9 @@ func greenWorld(t *testing.T, trunk, branch string) (p *pool, green string) {
 	git(t, root, "clone", "-q", remote, ".")
 	commit := func(message, landYAML string) string {
 		write(t, filepath.Join(root, "stage"), message+"\n")
-		write(t, filepath.Join(root, config.File), landYAML)
+		if landYAML != "" {
+			write(t, filepath.Join(root, config.File), landYAML)
+		}
 		git(t, root, "add", "-A")
 		git(t, root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", message)
 		return git(t, root, "rev-parse", "HEAD")

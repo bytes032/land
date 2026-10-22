@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -67,16 +68,18 @@ func Release(ctx context.Context, root string, cfg *config.Config) error {
 	return p.release(ctx)
 }
 
-const usage = "usage: land boxes claim [--type TYPE] | run [--type TYPE] -- CMD [ARGS...] | release | status | snapshot | " +
-	"sweep (with HCLOUD_TOKEN, the Hetzner project's API token, in the environment)"
+const usage = "usage: land boxes claim [--type TYPE] | run [--type TYPE] -- CMD [ARGS...] | release | status | " +
+	"snapshot [--head] | sweep (with HCLOUD_TOKEN, the Hetzner project's API token, in the environment)"
 
 // Main is `land boxes …`: claim claims the worktree's box, run runs CMD on it at the build root and exits with CMD's
 // exit code, release releases it as a spare, and status names each of the repository's boxes and its lease, and prints
 // crabbox's own `tunnel` and `cp` commands for the worktree's box. --type asks for a server type other than box.type,
-// only of a worktree with no box or a box of that type. snapshot builds the repository's snapshot, and sweep, the
-// hourly backstop, deletes the project's boxes that should be gone.
+// only of a worktree with no box or a box of that type. snapshot builds the repository's snapshot, --head at the
+// worktree's HEAD rather than the green commit, and sweep, the hourly backstop, deletes the project's boxes that should
+// be gone.
 func Main(ctx context.Context, args []string) error {
-	if len(args) == 0 || len(args) > 1 && args[0] != "claim" && args[0] != "run" && args[0] != "warm" {
+	if len(args) == 0 || len(args) > 1 && args[0] != "claim" && args[0] != "run" && args[0] != "warm" &&
+		!slices.Equal(args, []string{"snapshot", "--head"}) {
 		return errors.New(usage)
 	}
 	switch args[0] {
@@ -121,7 +124,7 @@ func Main(ctx context.Context, args []string) error {
 	case "status":
 		return p.status(ctx)
 	case "snapshot":
-		return p.snapshot(ctx)
+		return p.snapshot(ctx, len(args) > 1)
 	default:
 		return errors.New(usage)
 	}
