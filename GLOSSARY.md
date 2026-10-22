@@ -13,7 +13,7 @@ The one branch every landing moves forward, never backward.
 _Avoid_: main, master (those are a repository's names for it)
 
 **Lost race**:
-A landing whose push is refused because the trunk moved while it was being checked.
+A landing whose push is refused because the trunk moved since it was rebased.
 
 **Unchecked landing**:
 A landing pushed without its own check, because the failure it hit was already on the trunk or is a known flaky test.
