@@ -1,0 +1,28 @@
+#!/bin/sh
+# land's shim: runs the land version this worktree's .land.yaml pins, installing it once per version with
+# `go install`. After the first install, it needs no network.
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+config=$root/.land.yaml
+[ -f "$config" ] || { echo "land shim: no $config" >&2; exit 2; }
+version=$(sed -n 's/^version:[[:space:]]*\([^[:space:]#]*\).*$/\1/p' "$config")
+case $version in
+'' | [!0-9]* | *[!0-9A-Za-z.+-]*)
+	echo "land shim: $config needs one top-level 'version:' with a bare, unquoted version such as 0.1.0; found '$version'" >&2
+	exit 2
+	;;
+esac
+
+dir=${XDG_CACHE_HOME:-$HOME/.cache}/land/v$version
+if [ ! -x "$dir/land" ]; then
+	mkdir -p "$dir"
+	# Installed beside the cache entry, then renamed, so an interrupted install never leaves a broken binary.
+	tmp=$(mktemp -d "$dir/install.XXXXXX")
+	trap 'rm -rf "$tmp"' EXIT
+	GOBIN=$tmp go install "github.com/bytes032/land@v$version"
+	mv "$tmp/land" "$dir/land"
+	rm -rf "$tmp"
+	trap - EXIT
+fi
+exec "$dir/land" "$@"

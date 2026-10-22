@@ -1,0 +1,4 @@
+repository: openclaw/agent-skills
+commit: a9573b1e9ae1aeab51b10c16ef3b06628e6e520c
+helper: skills/autoreview/scripts/autoreview
+version: autoreview source-sha256:d63ec3000cc7450d9bcf4fe60f2b0cdd54173e407790fe8b82e4ad91e749a5f5
