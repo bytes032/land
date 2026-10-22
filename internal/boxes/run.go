@@ -71,6 +71,11 @@ func (b *box) run(ctx context.Context, prepare string, fetch []string, argv ...s
 // left. The box's repository ignores crabbox's .crabbox/, which holds crabbox's manifest, and land's .land/, neither of
 // them repository files; a snapshot carries the repository, and with it what it ignores.
 //
+// Each record also makes the tree it records the box repository's HEAD, so that a repository's command that reads the
+// commit (git rev-parse HEAD, git log -1) finds one, and git status finds the tree clean. The commit has
+// no parent and land's own identity, and is made without hooks or signing; a tree HEAD already holds keeps its commit,
+// so a re-sync of the same tree, and a box readied from a snapshot of it, keep the same HEAD.
+//
 // Box commands may run side by side; under a lock, one at a time readies the build root and records it.
 // shortcut: a CMD killed after changing tracked files leaves them unrecorded, so a build may keep artifacts built from
 // them once the copy restores the old content; record the tree from a trap if that ever bites.
@@ -115,8 +120,11 @@ if [ -f "$manifest" ]; then
     print "$_\0" if -l $_ || -f _' "$manifest" | xargs -0r rm -f --
 fi
 record() {
-  git add -A && { git write-tree | tr '\n' '\0' && git ls-files -z |
-    perl -MTime::HiRes=lstat -0lne 'my @s = lstat $_ or next; -l $_ or printf "%s\0%.9f\0", $_, $s[9]'; } \
+  git add -A && tree=$(git write-tree) &&
+    { [ "$(git rev-parse -q --verify 'HEAD^{tree}')" = "$tree" ] ||
+      git update-ref HEAD "$(git -c user.name=land -c user.email=land@localhost -c commit.gpgsign=false commit-tree -m land "$tree")"; } &&
+    { printf '%s\0' "$tree" && git ls-files -z |
+      perl -MTime::HiRes=lstat -0lne 'my @s = lstat $_ or next; -l $_ or printf "%s\0%.9f\0", $_, $s[9]'; } \
     >.git/land-times.new && mv .git/land-times.new .git/land-times
 }
 if [ -f .git/land-times ] && IFS= read -r -d '' recorded <.git/land-times &&

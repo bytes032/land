@@ -232,3 +232,30 @@ func TestTheBoxScriptSurvivesADirectoryBecomingAFile(t *testing.T) {
 	run(t, b, "true")
 	run(t, b, "true")
 }
+
+// The box's repository has a commit of the tree the command runs on, so a command that reads HEAD finds one and git
+// status finds nothing to commit; the same tree keeps its commit, and a changed one gets a commit of its own.
+func TestTheBoxScriptCommitsTheTreeAsHEAD(t *testing.T) {
+	newFake(t)
+	p, _, _ := testPool(t)
+	b := claimed(t, p, "cpx42")
+	seen := filepath.Join(t.TempDir(), "seen")
+	sees := func() (head string) {
+		t.Helper()
+		run(t, b, "sh", "-c", `{ git rev-parse HEAD 'HEAD^{tree}' && git write-tree && git status --porcelain; } >"$1"`, "sh", seen)
+		data, err := os.ReadFile(seen)
+		if lines := strings.Fields(string(data)); err != nil || len(lines) != 3 || lines[1] != lines[2] {
+			t.Fatalf("the command saw HEAD, its tree, the tree and git status as %q, %v; want HEAD a commit of the tree, and nothing to commit", data, err)
+		}
+		return strings.Fields(string(data))[0]
+	}
+	write(t, filepath.Join(p.build, "a"), "a")
+	first := sees()
+	if again := sees(); again != first {
+		t.Fatalf("the same tree moved HEAD from %s to %s", first, again)
+	}
+	write(t, filepath.Join(p.build, "a"), "changed")
+	if changed := sees(); changed == first {
+		t.Fatal("a changed tree kept HEAD")
+	}
+}
