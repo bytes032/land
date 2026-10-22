@@ -106,8 +106,9 @@ type lander struct {
 
 // land lands the worktree's work as one commit with the message in file, checked on the box at its exact tree,
 // pushed to the trunk with no force, and marked success; a CI run of the commit that completed already is rerun. A
-// lost race pushes the rebased commit at once, marked pending, and checks it after the push (push, checkPushed). An
-// unchecked landing skips the check and gets the mark u names, with its Unchecked trailer.
+// lost race pushes the rebased commit at once, marked pending, and checks it after the push (push, checkPushed), as
+// every landing does under push: first. An unchecked landing skips the check and gets the mark u names, with its
+// Unchecked trailer.
 func (l *lander) land(ctx context.Context, file string, u unchecked) error {
 	id, err := provenance.FromEnv()
 	if err != nil {
@@ -163,7 +164,7 @@ func (l *lander) land(ctx context.Context, file string, u unchecked) error {
 		return err
 	}
 	var verdict check.Outcome
-	if !u.on {
+	if !u.on && l.cfg.Push == config.PushAfterCheck {
 		if verdict, err = l.check(ctx, landing); err != nil {
 			return l.unamend(ctx, err)
 		}

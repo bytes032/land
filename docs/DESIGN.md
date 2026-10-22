@@ -2,11 +2,12 @@
 
 land lands an agent's work on a repository's trunk: one commit at a time, checked on the agent's own test box at the exact tree it pushes, pushed with no lock and no pull request, and marked with a commit status that CI copies. Every repository that does this had rebuilt the same machinery by hand, and fixes made in one never reached the others; land is that machinery in one versioned package. Terms are defined in [`GLOSSARY.md`](../GLOSSARY.md); the rules agents follow are in [`internal/docs/LANDING.md`](../internal/docs/LANDING.md).
 
-## The protocol (fixed, never configurable)
+## The protocol (fixed; a repository picks only the push's order)
 
 - **One commit per landing,** squashed and rebased with a merge that writes no worktree files; the trunk is fetched into the worktree's own ref.
 - **The check at the push runs at the exact tree pushed.** The box compares its tree with the commit's before running any check.
 - **Fast-forward only, never forced, no lock.** `land pre-push` refuses deleting the trunk or moving it backward.
+- **Check, then push, or push, then check** (`push:`): `after-check`, the default, checks the commit before the push; `first` pushes it at once, regenerated, marked `pending`, then checks and marks it as after a lost race. Push first trades a red commit on the trunk now and then for nobody waiting on the check to see the commit; new work still branches from the green commit.
 - **A lost race pushes first and checks after:** the rebased commit is pushed with the mark `pending`, checked, then marked. Derived-file conflicts take the trunk's side and are regenerated; any other conflict stops land.
 - **One CI run per commit, never cancelled.** The commit's CI run is the push run of land's own workflow, `.github/workflows/land.yml`, which holds the gate and has no `concurrency:` group (a group cancels waiting runs); the repository's other workflows are its own, and land never reruns them. When land or `recheck` replaces a `pending`, missing or `error` mark with a final one, it reruns that run if it already completed.
 - **No reruns of a failing check, no reverts:** fix forward.
@@ -30,6 +31,7 @@ Every command runs under `bash -eo pipefail -c` at the repository root; on the M
 ```yaml
 version: 0.1.0
 trunk: main
+push: after-check                           # after-check | first
 message: {require: ['^Closes #\d+$']}       # each pattern matched line by line
 gate: {timeout: 30m, unverified: fail}      # unverified: fail | skip
 box: {type: cpx42, env: {}}
