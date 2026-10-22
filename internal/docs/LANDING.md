@@ -88,11 +88,14 @@ Write the commit message to a file, then run `land --message FILE`.
 
 ## CI
 
-One CI run per commit, never cancelled, and it checks nothing: its gate, `land gate`, waits up to `gate.timeout` for
-the commit's mark. `success` passes; `failure` fails; `error`, or no final mark by then, fails under
+One CI run per commit, never cancelled, and it checks nothing: the gate, `land gate`, waits up to `gate.timeout` for
+the commit's mark. It lives in its own workflow, `.github/workflows/land.yml`, run on every push to the trunk, with no
+`concurrency:` group: runs of different commits go in parallel, and a group would cancel a waiting run, leaving that
+commit without a verdict. `success` passes; `failure` fails; `error`, or no final mark by then, fails under
 `gate.unverified: fail` and passes under `skip`. The gate outputs `verified`, true only for `success` on a commit that
-isn't an unchecked landing, which is what a deploy reads. When land or `land recheck` sets a final mark after the
-commit's CI run completed, it reruns that run, so CI agrees with the mark.
+isn't an unchecked landing; a deploy reads it in a job after the gate in `land.yml`, and serializes itself if it must.
+When land or `land recheck` sets a final mark after the commit's `land.yml` run completed, it reruns that run, so CI
+agrees with the mark; land never reruns the repository's other workflows.
 
 ## Stay with the commit
 

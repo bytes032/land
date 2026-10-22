@@ -109,7 +109,7 @@ func TestTheOperationsSpeakGitHubsAPI(t *testing.T) {
 	a := &api{token: "t", routes: map[string]func(http.ResponseWriter){
 		"POST /repos/o/r/statuses/abc":         reply(201, `{"id":1}`),
 		"POST /repos/o/r/commits/abc/comments": reply(201, `{"html_url":"https://github.com/o/r/commit/abc#commitcomment-1"}`),
-		"GET /repos/o/r/actions/workflows/ci.yml/runs": reply(200, `{"total_count":2,"workflow_runs":[`+
+		"GET /repos/o/r/actions/workflows/land.yml/runs": reply(200, `{"total_count":2,"workflow_runs":[`+
 			`{"id":9,"status":"in_progress","conclusion":null},{"id":7,"status":"completed","conclusion":"failure"}]}`),
 		"POST /repos/o/r/actions/runs/7/rerun": reply(201, `{}`),
 		"GET /repos/o/r/issues/1":              reply(200, `{"state":"open"}`),
@@ -135,7 +135,7 @@ func TestTheOperationsSpeakGitHubsAPI(t *testing.T) {
 	}
 	runs, err := g.Runs(ctx, "abc")
 	if err != nil || !slices.Equal(runs, []Run{{ID: 9, Status: "in_progress"}, {ID: 7, Status: "completed", Conclusion: "failure"}}) ||
-		a.requests[2] != "GET /repos/o/r/actions/workflows/ci.yml/runs?event=push&head_sha=abc&per_page=100" {
+		a.requests[2] != "GET /repos/o/r/actions/workflows/land.yml/runs?event=push&head_sha=abc&per_page=100" {
 		t.Errorf("Runs = %+v, %v after %q", runs, err, a.requests[2])
 	}
 	if err := g.Rerun(ctx, 7); err != nil || a.requests[3] != "POST /repos/o/r/actions/runs/7/rerun" {
