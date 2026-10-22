@@ -113,3 +113,24 @@ func TestLoadNamesTheKeyAtFault(t *testing.T) {
 		}
 	}
 }
+
+// A key land doesn't know, at the top, inside a section or inside a check, is refused and named, so a misspelled or
+// removed key is never silently ignored.
+func TestUnknownKeysAreRefused(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"status": "version: 0.1.0\nstatus: box/verify\n",
+		"tools":  "version: 0.1.0\nstages:\n  tools: []\n",
+		"timout": "version: 0.1.0\ngate: {timout: 30m}\n",
+		"comand": "version: 0.1.0\nstages:\n  check:\n    lint: {comand: make lint}\n",
+	} {
+		if _, err := Parse([]byte(yaml)); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("a .land.yaml with %q: error %v, want one naming it", name, err)
+		}
+	}
+	if c, err := Parse([]byte("version: 0.1.0\nstages:\n  check:\n    lint: {run: make lint, paths: [src/]}\n")); err != nil || c.Stages.Check[0].Paths[0] != "src/" {
+		t.Fatalf("a valid file: %+v, %v", c, err)
+	}
+	if _, err := Parse(nil); err != nil {
+		t.Fatalf("an empty file: %v", err)
+	}
+}

@@ -10,8 +10,10 @@ import (
 // Context is the commit status context of every mark.
 const Context = "land"
 
-// Workflow is the workflow file whose push run is "the commit's CI run": the one that holds the gate job.
-const Workflow = "ci.yml"
+// Workflow is the workflow file whose push run is "the commit's CI run": land's own, holding the gate job and whatever
+// the repository wants to run after it. land reruns it after setting a final mark, so the repository's other workflows
+// (image builds, say) are never rerun by land.
+const Workflow = "land.yml"
 
 // State is a mark's state.
 type State string

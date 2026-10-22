@@ -3,9 +3,11 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -72,20 +74,33 @@ type Check struct {
 // Checks are the check stage's entries in the order the file lists them, the order they run in.
 type Checks []Check
 
-// UnmarshalYAML reads a mapping of check names to checks, keeping its order.
+// UnmarshalYAML reads a mapping of check names to checks, keeping its order. Each check is decoded as strictly as the
+// file: a key no check has is an error.
 func (c *Checks) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.MappingNode {
 		return fmt.Errorf("line %d: stages.check is a mapping of check names to checks", node.Line)
 	}
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		var check Check
-		if err := node.Content[i+1].Decode(&check); err != nil {
-			return err
+		if err := strict(node.Content[i+1], &check); err != nil {
+			return fmt.Errorf("stages.check.%s: %w", node.Content[i].Value, err)
 		}
 		check.Name = node.Content[i].Value
 		*c = append(*c, check)
 	}
 	return nil
+}
+
+// strict decodes node into v refusing keys v has no field for, which node.Decode alone doesn't: a decoder's KnownFields
+// doesn't reach a custom UnmarshalYAML's node.
+func strict(node *yaml.Node, v any) error {
+	data, err := yaml.Marshal(node)
+	if err != nil {
+		return err
+	}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	return decoder.Decode(v)
 }
 
 // Regenerate kinds.
@@ -114,10 +129,13 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// Parse reads a .land.yaml's bytes. It doesn't validate them; Load does.
+// Parse reads a .land.yaml's bytes, refusing keys land doesn't know, so a misspelled or removed key is an error
+// rather than silently ignored. It doesn't validate the values; Load does.
 func Parse(data []byte) (*Config, error) {
 	var c Config
-	if err := yaml.Unmarshal(data, &c); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&c); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 	return &c, nil

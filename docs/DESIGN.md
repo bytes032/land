@@ -8,7 +8,7 @@ land lands an agent's work on a repository's trunk: one commit at a time, checke
 - **The check at the push runs at the exact tree pushed.** The box compares its tree with the commit's before running any check.
 - **Fast-forward only, never forced, no lock.** `land pre-push` refuses deleting the trunk or moving it backward.
 - **A lost race pushes first and checks after:** the rebased commit is pushed with the mark `pending`, checked, then marked. Derived-file conflicts take the trunk's side and are regenerated; any other conflict stops land.
-- **One CI run per commit, never cancelled.** The commit's CI run is the push run of `.github/workflows/ci.yml`. When land or `recheck` replaces a `pending`, missing or `error` mark with a final one, it reruns that run if it already completed.
+- **One CI run per commit, never cancelled.** The commit's CI run is the push run of land's own workflow, `.github/workflows/land.yml`, which holds the gate and has no `concurrency:` group (a group cancels waiting runs); the repository's other workflows are its own, and land never reruns them. When land or `recheck` replaces a `pending`, missing or `error` mark with a final one, it reruns that run if it already completed.
 - **No reruns of a failing check, no reverts:** fix forward.
 - **Every landing carries `Agent-Session` and `Agent`,** plus `Unchecked` on an unchecked landing. land writes them; the author never does.
 
