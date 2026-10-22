@@ -215,3 +215,20 @@ func TestRunNamesTheStageItStoppedAt(t *testing.T) {
 		t.Fatal("the fetch kept the worktree's .land/stale.json, which the box doesn't have")
 	}
 }
+
+// A commit that turns a directory into a file leaves the box's record naming the directory's old files; the script
+// gives back times only to files that exist, so that command and every later one still run.
+func TestTheBoxScriptSurvivesADirectoryBecomingAFile(t *testing.T) {
+	newFake(t)
+	p, _, _ := testPool(t)
+	b := claimed(t, p, "cpx42")
+	write(t, filepath.Join(p.build, "sub", "a"), "a")
+	write(t, filepath.Join(p.build, "sub", "b"), "b")
+	run(t, b, "true")
+	if err := os.RemoveAll(filepath.Join(p.build, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(p.build, "sub"), "now a file")
+	run(t, b, "true")
+	run(t, b, "true")
+}

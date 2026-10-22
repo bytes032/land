@@ -70,9 +70,9 @@ sudo tee ` + runDir + `/self-delete >/dev/null <<'LAND'
 ` + selfDeleteScript() + `LAND
 sudo tee ` + runDir + `/rearm >/dev/null <<'LAND'
 ` + rearmScript() + `LAND
-sudo chmod 700 ` + runDir + `/self-delete ` + runDir + `/rearm
-sudo ` + runDir + `/rearm
-sudo systemd-run --quiet --collect --unit land-self-delete --on-calendar '*:*:00' ` + runDir + `/self-delete
+sudo chmod 600 ` + runDir + `/self-delete ` + runDir + `/rearm
+sudo bash ` + runDir + `/rearm
+sudo systemd-run --quiet --collect --unit land-self-delete --on-calendar '*:*:00' /bin/bash ` + runDir + `/self-delete
 `, "Authorization: Bearer " + token + "\n", nil
 }
 
@@ -133,7 +133,7 @@ sudo touch ` + runDir + `/spare`
 // held box again, its deadline the held one, stops its warm-up, every process in its unit, before crabbox copies the
 // worktree there, removes its deadline label and, only then, the deadline from its record.
 func (p *pool) disarm(ctx context.Context, c claim) error {
-	script := `sudo rm -f ` + runDir + `/spare && sudo ` + runDir + `/rearm && { sudo systemctl stop land-warm 2>/dev/null || true; } &&
+	script := `sudo rm -f ` + runDir + `/spare && sudo bash ` + runDir + `/rearm && { sudo systemctl stop land-warm 2>/dev/null || true; } &&
 ! systemctl is-active --quiet land-warm`
 	if err := p.crabbox(ctx, c.Box, p.stderr, p.stderr, "run", "--id", c.Lease, "--reclaim", "--no-sync", "--", "bash", "-c", script); err != nil {
 		return err
@@ -272,7 +272,14 @@ func (p *pool) checkout(ctx context.Context, box, commit string, f func(q *pool)
 	if _, err := p.git(ctx, "worktree", "add", "--quiet", "--force", "--detach", dir, commit); err != nil {
 		return err
 	}
-	defer func() { _, _ = p.git(context.WithoutCancel(ctx), "worktree", "remove", "--force", dir) }()
+	defer func() {
+		ctx := context.WithoutCancel(ctx)
+		if _, err := os.Stat(dir); err != nil { // ended with the box's folder, which held it: git only needs to forget it
+			_, _ = p.git(ctx, "worktree", "prune")
+			return
+		}
+		_, _ = p.git(ctx, "worktree", "remove", "--force", dir)
+	}()
 	cfg, err := config.Load(dir)
 	if err != nil {
 		return fmt.Errorf("the configuration at %.12s: %w", commit, err)

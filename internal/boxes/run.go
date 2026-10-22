@@ -126,7 +126,7 @@ else
   : >.git/land-moved
 fi
 { cat .git/land-moved && git diff -z --name-only --no-renames && git ls-files -z --others --exclude-standard; } |
-  xargs -0r touch -c --
+  perl -0 -ne 'chomp; print "$_\0" if -e $_' | xargs -0r touch -c --
 record
 ` + prepare + `exec 9>&-
 trap - EXIT
@@ -136,7 +136,7 @@ code=0
 exec 9>>"${TMPDIR:-/tmp}/land.lock"
 flock 9
 record || echo "land: the box couldn't record its tree, so its next command may rebuild what it needn't" >&2
-sudo -n ` + runDir + `/rearm 2>/dev/null || true
+sudo -n bash ` + runDir + `/rearm 2>/dev/null || true
 exit $code
 `
 }
