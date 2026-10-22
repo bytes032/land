@@ -106,10 +106,15 @@ sync`
 }
 
 // snapshot is `land boxes snapshot`: it builds the repository's snapshot at the trunk's green commit, or its tip when
-// none is green, whatever the worktree holds, with that commit's own configuration, in a temporary checkout of it in
-// the folder of the box it builds on, which goes after with the box, whatever happens.
-func (p *pool) snapshot(ctx context.Context) error {
-	commit, err := p.green(ctx)
+// none is green, or with head at the worktree's HEAD commit, whatever the worktree holds, with that commit's own
+// configuration, in a temporary checkout of it in the folder of the box it builds on, which goes after with the box,
+// whatever happens.
+func (p *pool) snapshot(ctx context.Context, head bool) error {
+	at := p.green
+	if head {
+		at = p.head
+	}
+	commit, err := at(ctx)
 	if err != nil {
 		return err
 	}

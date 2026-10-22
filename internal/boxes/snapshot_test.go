@@ -81,7 +81,7 @@ func TestASnapshotIsBuiltAtTheGreenCommitAndReplacesTheOldOnlyOnceAvailable(t *t
 			}
 		}
 	}
-	if err := p.snapshot(t.Context()); err != nil {
+	if err := p.snapshot(t.Context(), false); err != nil {
 		t.Fatal(err)
 	}
 	if images := f.lines(t, "images", ""); !slices.Equal(images, []string{"plain Ubuntu"}) {
@@ -116,6 +116,36 @@ func TestASnapshotIsBuiltAtTheGreenCommitAndReplacesTheOldOnlyOnceAvailable(t *t
 	}
 	if data, err := os.ReadFile(filepath.Join(p.root, "work.txt")); err != nil || string(data) != "uncommitted" {
 		t.Fatalf("the worktree's work: %q, %v", data, err)
+	}
+}
+
+// `land boxes snapshot --head` builds the snapshot at the worktree's HEAD commit, with its own configuration, when the
+// trunk has none yet, as before a repository's adoption of land lands, and labels it with that commit; without --head,
+// the trunk's green commit, with no configuration, builds nothing. A HEAD with no committed .land.yaml is refused.
+func TestASnapshotAtHeadIsBuiltAtHeadsCommitWithItsConfiguration(t *testing.T) {
+	f := newFake(t)
+	p, green := greenWorld(t, "", testConfig+"  setup: echo the branch setup >>stages\n")
+	p.sleep = func(context.Context, time.Duration) error { return nil }
+	if err := p.snapshot(t.Context(), false); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%.12s", green)) {
+		t.Fatalf("without --head: %v; want the green commit's missing configuration", err)
+	}
+	head := git(t, p.root, "rev-parse", "HEAD")
+	if err := p.snapshot(t.Context(), true); err != nil {
+		t.Fatal(err)
+	}
+	if heads := f.lines(t, "heads", ""); len(heads) == 0 || slices.ContainsFunc(heads, func(h string) bool { return h != head }) {
+		t.Fatalf("crabbox ran from checkouts at %q; want each at HEAD %s", heads, head)
+	}
+	if data, err := os.ReadFile(filepath.Join(p.build, "stages")); err != nil || string(data) != "the branch setup\n" {
+		t.Fatalf("the box ran %q, %v; want HEAD's setup", data, err)
+	}
+	if _, images := f.api.changed(); len(images) != 1 || images[0].Labels["commit"] != head {
+		t.Fatalf("snapshots %+v; want one at HEAD %s", images, head)
+	}
+	git(t, p.root, "rm", "-q", "--cached", ".land.yaml")
+	git(t, p.root, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "no configuration")
+	if err := p.snapshot(t.Context(), true); err == nil || !strings.Contains(err.Error(), "has no committed .land.yaml") {
+		t.Fatalf("at a HEAD with only an uncommitted .land.yaml: %v; want it refused", err)
 	}
 }
 

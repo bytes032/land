@@ -247,6 +247,18 @@ func (p *pool) green(ctx context.Context) (string, error) {
 	return sha, err
 }
 
+// head is the commit `land boxes snapshot --head` builds at: the worktree's HEAD, which must hold a .land.yaml.
+func (p *pool) head(ctx context.Context) (string, error) {
+	commit, err := p.git(ctx, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	if listed, err := p.git(ctx, "ls-tree", "--name-only", commit, "--", config.File); err != nil || listed == "" {
+		return "", cmp.Or(err, fmt.Errorf("HEAD, %.12s, has no committed %s to build the snapshot with", commit, config.File))
+	}
+	return commit, nil
+}
+
 // checkout runs f on the pool as a temporary checkout of commit sees it, with that commit's own configuration: a
 // worktree of the repository in the box's folder, named as crabbox names the repository's workspace, which it removes
 // after; one an earlier checkout left there goes first.
