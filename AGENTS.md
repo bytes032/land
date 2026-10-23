@@ -31,4 +31,5 @@ Drive a module through its interface and assert what a caller sees. Each test mu
 ## Commits and releases
 
 - Conventional Commits (`fix(boxes): …`); the body says what and why.
+- **Several sessions work on land at once.** Work in your own worktree (`git worktree add ../land-wt/<name> -b t/<name> main`), never in the main checkout and never on another's branch; use absolute paths, since a shell may start in the main checkout. Before committing, read `git diff --staged` and commit only your own changes. Only one session merges and releases at a time.
 - A release is a tag `vX.Y.Z` on `main`, pushed to GitHub once the `boximage` test passes on it: patch for fixes, minor for new behaviour or `.land.yaml` keys. Never move or reuse a tag; the module proxy keeps the first commit it saw for it. Adopting repositories take it by setting `version:` in `.land.yaml` and running `land docs`.
