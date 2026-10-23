@@ -586,11 +586,11 @@ func (p *pool) create(ctx context.Context, box, typ string, snapshot bool) (c cl
 
 // round tries, once, each box create may get for the pending box c, in order, and returns the first it got, or, with
 // none, what Hetzner said to the first it refused. First come new boxes of the type asked for, c's, in each location
-// Hetzner sells it now, cheapest first; for a worktree, then a spare of a type at least as big (atLeast), and new boxes
-// of a bigger type whose disk holds the snapshot, cheapest type and location first. A snapshot's build gets only the
-// first: its snapshot's disk is its box's, which must stay box.type's. Hetzner refusing a box at the project's server
-// limit refuses every later new box, and at its dedicated-core limit every later dedicated one as big: round asks for
-// none of them.
+// Hetzner sells it now, cheapest first, unless its disk is smaller than the snapshot's; for a worktree, then a spare of
+// a type at least as big (atLeast), and new boxes of a bigger type whose disk holds the snapshot, cheapest type and
+// location first. A snapshot's build gets only the first: its snapshot's disk is its box's, which must stay box.type's.
+// Hetzner refusing a box at the project's server limit refuses every later new box, and at its dedicated-core limit
+// every later dedicated one as big: round asks for none of them.
 func (p *pool) round(ctx context.Context, c claim) (claim, string, error) {
 	types, err := p.hz.serverTypes(ctx)
 	if err != nil {
@@ -639,7 +639,12 @@ func (p *pool) round(ctx context.Context, c claim) (claim, string, error) {
 		}
 		return c, false, nil
 	}
-	if made, done, err := first(offers(asked)); done {
+	own := offers(asked)
+	if !c.Snapshot && asked.Disk < snapshot.DiskSize {
+		fmt.Fprintf(p.stderr, "land: a %s's %g GB disk can't boot the snapshot, made on a %g GB one\n", asked.Name, asked.Disk, snapshot.DiskSize)
+		own = nil
+	}
+	if made, done, err := first(own); done {
 		return made, "", err
 	}
 	if !c.Snapshot {

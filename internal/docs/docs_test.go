@@ -33,7 +33,7 @@ func TestLandingHoldsItsSectionsTheFindingsRuleAndTheCommands(t *testing.T) {
 	}
 	for _, command := range []string{
 		"land green", "land boxes run --", "land boxes status", "land boxes claim --type", "land boxes release",
-		"land boxes snapshot", "land review --prompt-file", "land review check", "land --message FILE",
+		"land boxes snapshot", "land boxes types", "land review --prompt-file", "land review check", "land --message FILE",
 		"--unchecked`", "--unchecked '#N'", "land recheck SHA", "land gate", "land docs", "land pre-push",
 		"crabbox tunnel", "crabbox cp",
 	} {

@@ -50,6 +50,22 @@ func TestATypeSoldNowhereFallsBackToTheCheapestBiggerTypeTheSnapshotBoots(t *tes
 	}
 }
 
+// A claim of a type whose disk is smaller than the snapshot's never asks Hetzner for one, which would refuse it in
+// every location: it says why, and gets the cheapest bigger type whose disk holds the snapshot.
+func TestATypeWhoseDiskCantBootTheSnapshotIsNeverTried(t *testing.T) {
+	f := newFake(t)
+	f.api.images[0].DiskSize = 320 // a cpx42's, more than cx43's
+	p, _, stderr := testPool(t)
+	b := claimed(t, p, "cx43")
+	if attempts := f.lines(t, "attempts", ""); slices.ContainsFunc(attempts, func(a string) bool { return strings.HasPrefix(a, "cx43 ") }) ||
+		b.c.Type == "cx43" {
+		t.Fatalf("crabbox tried %q and gave a %s; want no cx43 tried", attempts, b.c.Type)
+	}
+	if said := "land: a cx43's 160 GB disk can't boot the snapshot, made on a 320 GB one\n"; !strings.Contains(stderr.String(), said) {
+		t.Fatalf("the claim didn't say %q:\n%s", said, stderr)
+	}
+}
+
 // A spare of a bigger type serves a claim only once the claim's own type can't be had: while Hetzner sells cpx42s, a
 // claim of one creates one; once it sells none, the claim takes the spare cpx62, saying so, before any bigger new box,
 // and the box it would have created goes.
