@@ -7,10 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/bytes032/land/internal/proc"
 )
 
 // Trailer keys.
@@ -86,10 +87,10 @@ func (id Identity) Message(text, unchecked string) (string, error) {
 
 // Trailer is the value of the commit's trailer key, or "" when it has none.
 func Trailer(ctx context.Context, dir, sha, key string) (string, error) {
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "log", "-1", "--format=%(trailers:key="+key+",valueonly,separator=%x00)", sha, "--").Output()
+	out, err := proc.Output(ctx, proc.Spec{Argv: []string{"git", "-C", dir, "log", "-1", "--format=%(trailers:key=" + key + ",valueonly,separator=%x00)", sha, "--"}})
 	if err != nil {
 		return "", err
 	}
-	value, _, _ := strings.Cut(strings.TrimRight(string(out), "\n"), "\x00")
+	value, _, _ := strings.Cut(strings.TrimRight(out, "\n"), "\x00")
 	return strings.TrimSpace(value), nil
 }

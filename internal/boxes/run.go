@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/bytes032/land/internal/proc"
+	"github.com/bytes032/land/internal/stage"
 )
 
 // box is a worktree's claimed box.
@@ -91,7 +92,7 @@ func (p *pool) script(prepare string) string {
 	}
 	if prepare != "" {
 		prepare = "printf 'land: %s\\n' prepare >&2\n" +
-			"bash -eo pipefail -c " + quote(prepare) + " land 9>&- >&2\n"
+			stage.Bash + " " + quote(prepare) + " land 9>&- >&2\n"
 	}
 	return `printf 'land: %s\n' script >&2
 trap 'printf "land: %s\n" stopped >&2' EXIT

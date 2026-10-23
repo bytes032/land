@@ -185,7 +185,7 @@ func review(dir, command string, args ...string) error {
 
 func finished(t *testing.T, dir string) error {
 	t.Helper()
-	return check(context.Background(), dir, "main", []string{"gen/"}, io.Discard)
+	return check(context.Background(), dir, &config.Config{Trunk: "main"}, []string{"gen/"}, io.Discard)
 }
 
 // records are the finished markers recorded for any key.

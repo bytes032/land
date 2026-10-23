@@ -1,6 +1,6 @@
 // Package stage runs a repository's stage command on the Mac: `bash -eo pipefail -c`, at the repository root, with the
 // stage's inputs as $1, $2, …, and the running land binary's directory first on PATH, so a `land …` inside the command
-// runs the same pinned version. (On the box, the core's box script runs stage commands the same way.)
+// runs the same pinned version. On the box, the core's scripts run stage commands with the same Bash line.
 package stage
 
 import (
@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/bytes032/land/internal/proc"
 )
@@ -22,9 +23,13 @@ type Spec struct {
 	Stderr  io.Writer
 }
 
-// Argv is the command line that runs spec's command: bash -eo pipefail -c COMMAND land ARGS….
+// Bash is how every stage command runs, on the Mac and in the box's scripts: `Bash COMMAND land ARGS…`, so the
+// command's $0 is land and its inputs are $1, $2, ….
+const Bash = "bash -eo pipefail -c"
+
+// Argv is the command line that runs spec's command: Bash COMMAND land ARGS….
 func Argv(command string, args []string) []string {
-	return slices.Concat([]string{"bash", "-eo", "pipefail", "-c", command, "land"}, args)
+	return slices.Concat(strings.Fields(Bash), []string{command, "land"}, args)
 }
 
 // Run runs the stage command and returns its error; a non-zero exit is a proc.Exit error.

@@ -33,7 +33,7 @@ func RecheckMain(ctx context.Context, args []string) error {
 // for it, on that worktree's box, and sets its final mark; the worktree land runs in is never touched. The added
 // worktree and its box go once the recheck ends.
 func (l *lander) recheck(ctx context.Context, rev string) error {
-	onto, err := l.fetch(ctx)
+	onto, err := l.cfg.FetchTrunk(ctx, l.root)
 	if err != nil {
 		return err
 	}

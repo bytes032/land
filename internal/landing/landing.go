@@ -21,6 +21,7 @@ import (
 	"github.com/bytes032/land/internal/proc"
 	"github.com/bytes032/land/internal/provenance"
 	"github.com/bytes032/land/internal/review"
+	"github.com/bytes032/land/internal/stage"
 )
 
 // Main is `land --message FILE [--unchecked ['#N']]`.
@@ -124,7 +125,7 @@ func (l *lander) land(ctx context.Context, file string, u unchecked) error {
 	if err := docs.Current(l.root); err != nil {
 		return err
 	}
-	onto, err := l.fetch(ctx)
+	onto, err := l.cfg.FetchTrunk(ctx, l.root)
 	if err != nil {
 		return err
 	}
@@ -222,17 +223,6 @@ func (l *lander) clean(ctx context.Context) error {
 		return fmt.Errorf("commit or drop your uncommitted changes and untracked files first:\n%s", dirty)
 	}
 	return nil
-}
-
-// fetch fetches the trunk into refs/worktree/<trunk>, a ref of the worktree's own that no other worktree's fetch
-// moves, refusing a trunk that moved backward, and returns its commit.
-func (l *lander) fetch(ctx context.Context) (string, error) {
-	ref := "refs/worktree/" + l.cfg.Trunk
-	// An empty --refmap leaves the remote-tracking branch alone.
-	if _, err := l.git(ctx, "fetch", "--quiet", "--refmap=", "origin", "refs/heads/"+l.cfg.Trunk+":"+ref); err != nil {
-		return "", err
-	}
-	return l.git(ctx, "rev-parse", "--verify", ref+"^{commit}")
 }
 
 // squash writes the work from base to head as one commit with message on onto, the trunk, and checks it out. The
@@ -422,7 +412,7 @@ func (l *lander) putBack(ctx context.Context, paths []string) error {
 const regenerateScript = `set -u
 while [ $# -ge 2 ]; do
 	code=0
-	bash -eo pipefail -c "$2" land < /dev/null || code=$?
+	` + stage.Bash + ` "$2" land < /dev/null || code=$?
 	if [ "$code" != 0 ]; then
 		echo "land: regenerating $1 failed with exit $code" >&2
 		exit "$code"
