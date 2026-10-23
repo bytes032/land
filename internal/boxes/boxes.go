@@ -54,7 +54,7 @@ func (e *StageError) Unwrap() error { return e.Err }
 // Claim returns the box the worktree at root holds, claiming one when it holds none. typ "" asks for no type: any box
 // the worktree holds, else a box of cfg.Box.Type; another refuses a box the worktree holds of a smaller type.
 func Claim(ctx context.Context, root string, cfg *config.Config, typ string) (Box, error) {
-	p, err := newPool(ctx, root, cfg)
+	p, err := newPool(ctx, root, cfg, hetznerBox)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +63,7 @@ func Claim(ctx context.Context, root string, cfg *config.Config, typ string) (Bo
 
 // Release releases the box the worktree at root holds, if any.
 func Release(ctx context.Context, root string, cfg *config.Config) error {
-	p, err := newPool(ctx, root, cfg)
+	p, err := newPool(ctx, root, cfg, hetznerBox)
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,10 @@ const usage = "usage: land boxes claim [--type TYPE] | run [--type TYPE] -- CMD 
 // only of a worktree with no box or one at least as big. snapshot builds the repository's snapshot, --head at the
 // worktree's HEAD rather than the green commit; types lists the server types a box may be; and sweep, the hourly
 // backstop, deletes the project's boxes that should be gone.
-func Main(ctx context.Context, args []string) error {
+func Main(ctx context.Context, args []string) error { return boxesMain(ctx, args, hetznerBox) }
+
+// boxesMain is Main on boxes whose box code box gives.
+func boxesMain(ctx context.Context, args []string, box func(repo string) boxCode) error {
 	if len(args) == 0 || len(args) > 1 && args[0] != "claim" && args[0] != "run" && args[0] != "warm" &&
 		!slices.Equal(args, []string{"snapshot", "--head"}) {
 		return errors.New(usage)
@@ -90,7 +93,7 @@ func Main(ctx context.Context, args []string) error {
 	case "types":
 		return printTypes(ctx, hetzner{}, os.Stdout)
 	case "warm":
-		return warmMain(ctx, args[1:])
+		return warmMain(ctx, args[1:], box)
 	}
 	out, err := proc.Output(ctx, proc.Spec{Argv: []string{"git", "rev-parse", "--show-toplevel"}, Stderr: os.Stderr})
 	if err != nil {
@@ -101,7 +104,7 @@ func Main(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	p, err := newPool(ctx, root, cfg)
+	p, err := newPool(ctx, root, cfg, box)
 	if err != nil {
 		return err
 	}

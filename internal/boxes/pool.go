@@ -44,17 +44,14 @@ var leaseTTL = strconv.Itoa(int(lifetime.Hours())) + "h"
 // than its folder. Widen it only after `go test -tags crabboxreal ./internal/boxes/` passes on the new version.
 const minCrabbox, maxCrabbox = "0.78.1", "0.80.0"
 
-// boxRoot holds every repository's build root on a box, /work/<owner>.<name>; tests move it to a directory of theirs.
-var boxRoot = "/work"
-
 // pool is the boxes of one repository, as one of its worktrees sees them.
 type pool struct {
-	root  string // the worktree's root; "" in release's background warm-up, which no worktree runs
-	cfg   *config.Config
-	repo  string // <owner>.<name>
-	dir   string // the claims and the boxes' folders: boxes/ in the repository's state directory
-	build string // the build root on every box, where crabbox's workspace for the lease links to
-	hz    hetzner
+	root string // the worktree's root; "" in release's background warm-up, which no worktree runs
+	cfg  *config.Config
+	repo string  // <owner>.<name>
+	dir  string  // the claims and the boxes' folders: boxes/ in the repository's state directory
+	code boxCode // land's box code on the repository's boxes
+	hz   hetzner
 	// stdout carries the box command's own output; stderr everything land and crabbox say.
 	stdout, stderr io.Writer
 	now            func() time.Time
@@ -64,16 +61,17 @@ type pool struct {
 	background func(dir string, args ...string) error
 }
 
-func newPool(ctx context.Context, root string, cfg *config.Config) (*pool, error) {
+func newPool(ctx context.Context, root string, cfg *config.Config, box func(repo string) boxCode) (*pool, error) {
 	repo, err := config.RepoName(ctx, root)
 	if err != nil {
 		return nil, err
 	}
-	return poolOf(ctx, repo, root, cfg)
+	return poolOf(ctx, repo, root, cfg, box)
 }
 
-// poolOf is the pool of the repository repo as the worktree at root sees it, once crabbox is a version land runs.
-func poolOf(ctx context.Context, repo, root string, cfg *config.Config) (*pool, error) {
+// poolOf is the pool of the repository repo as the worktree at root sees it, on boxes whose box code box gives, once
+// crabbox is a version land runs.
+func poolOf(ctx context.Context, repo, root string, cfg *config.Config, box func(repo string) boxCode) (*pool, error) {
 	if err := checkCrabbox(ctx); err != nil {
 		return nil, err
 	}
@@ -82,7 +80,7 @@ func poolOf(ctx context.Context, repo, root string, cfg *config.Config) (*pool, 
 		return nil, err
 	}
 	return &pool{
-		root: root, cfg: cfg, repo: repo, dir: filepath.Join(state, "boxes"), build: path.Join(boxRoot, repo),
+		root: root, cfg: cfg, repo: repo, dir: filepath.Join(state, "boxes"), code: box(repo),
 		stdout: os.Stdout, stderr: os.Stderr, now: time.Now, sleep: sleep, forge: forge.FromEnv, background: background,
 	}, nil
 }
@@ -713,55 +711,22 @@ func (p *pool) warmup(ctx context.Context, c claim, image, location string) (cla
 	return c, "", nil
 }
 
-// setup readies a new box: first it checks that the box's image has all land's box code needs (needs), failing with
-// all it lacks at once; then crabbox's workspace for its lease becomes a link to the build root, so that every box
-// builds at the same path whatever its lease; the box drops the SSH keys of other crabbox leases, which a box from a
-// snapshot of a spare inherits; and it gets its self-delete.
+// setup readies a new box with the box code's setup, failing with all its image lacks at once, if anything.
 func (p *pool) setup(ctx context.Context, c claim, workspace string) error {
 	ssh, err := p.ssh(ctx, c)
 	if err != nil {
 		return err
 	}
-	install, token, err := p.selfDelete(ctx, c.Server)
+	s, err := p.selfDeleteOf(ctx, c.Server)
 	if err != nil {
 		return err
 	}
-	script := `set -eu
-` + needs() + `
-sudo install -d -o "$(id -un)" -g "$(id -gn)" ` + quote(p.build) + `
-mkdir -p ` + quote(path.Dir(workspace)) + `
-ln -s ` + quote(p.build) + ` ` + quote(workspace) + `
-for keys in ~/.ssh/authorized_keys /root/.ssh/authorized_keys; do
-  if sudo test -f "$keys"; then sudo sed -i -e '/ crabbox ` + c.Lease + `$/b' -e '/ crabbox cbx_[0-9a-f]\{12\}$/d' "$keys"; fi
-done
-` + install
-	out, err := p.onBox(ctx, ssh, script, token)
+	script, stdin := p.code.setup(c.Lease, workspace, s)
+	out, err := p.onBox(ctx, ssh, script, stdin)
 	if lacks := strings.TrimSpace(out); err != nil && lacks != "" {
 		return fmt.Errorf("this box's image lacks %s; land's box code needs them (see .crabbox.yaml os)", strings.ReplaceAll(lacks, "\n", ", "))
 	}
 	return err
-}
-
-// needs is the shell that stops a new box, printing a line on stdout, where nothing else of setup's script prints, for
-// each thing its image lacks that land's box code uses: /bin/bash, which runs every script of land's; perl with
-// Time::HiRes, git, flock and xargs (the box script); sed (setup); grep, ss and curl (the self-delete); tar (fetch);
-// systemctl, and systemd-run with systemd 254's --expand-environment (the self-delete's timer, the warm-up, apt's
-// timers); cloud-init (a snapshot's build); sudo without a password, which every root step takes; a /run/land whose
-// scripts bash runs as root, wherever /run forbids executing them; and Hetzner's metadata service, which names the
-// server the self-delete deletes. coreutils, which every image has, aside.
-func needs() string {
-	return `lacks=$(
-  for cmd in /bin/bash git flock xargs sed grep ss curl tar systemctl cloud-init; do command -v $cmd >/dev/null || echo $cmd; done
-  perl -MTime::HiRes -e 1 2>/dev/null || echo "perl with Time::HiRes"
-  systemd-run --help 2>/dev/null | grep -q -e --expand-environment || echo "systemd-run with --expand-environment (systemd 254)"
-  if ! sudo -n true 2>/dev/null; then echo "sudo without a password"
-  elif ! sudo -n bash -c 'mkdir -p ` + runDir + ` && echo : >` + runDir + `/needs && bash ` + runDir + `/needs' 2>/dev/null; then
-    echo "a ` + runDir + ` whose scripts bash runs"
-  fi
-  ! command -v curl >/dev/null || curl -fsS --max-time 10 -o /dev/null ` + metadataURL + `/instance-id 2>/dev/null ||
-    echo "Hetzner's metadata service"
-)
-if [ -n "$lacks" ]; then echo "$lacks"; exit 1; fi`
 }
 
 // ssh is the SSH command crabbox prints for the box c, run in the pool's worktree, whose checkout crabbox's claim of
@@ -848,7 +813,7 @@ func (p *pool) status(ctx context.Context) error {
 			// Without the box's state crabbox knows no lease of it, and without land's ceiling it cuts the lease to 4 h.
 			env := "XDG_STATE_HOME=" + quote(filepath.Join(p.folder(held.Box), "state")) + " CRABBOX_MAX_TTL=" + leaseTTL
 			fmt.Fprintf(p.stdout, "%s crabbox tunnel --provider hetzner --id %s --local-port PORT PORT\n", env, held.Lease)
-			fmt.Fprintf(p.stdout, "%s crabbox cp --provider hetzner --id %s SANDBOX:%s/PATH PATH\n", env, held.Lease, p.build)
+			fmt.Fprintf(p.stdout, "%s crabbox cp --provider hetzner --id %s SANDBOX:%s/PATH PATH\n", env, held.Lease, p.code.build)
 		}
 		return nil
 	})

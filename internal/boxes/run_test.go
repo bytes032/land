@@ -55,10 +55,10 @@ func TestTheBoxScriptReadiesTheBuildRoot(t *testing.T) {
 			t.Errorf("crabbox ran %q; want the box script on stdin, out of its arguments", call)
 		}
 	}
-	if data, err := os.ReadFile(filepath.Join(p.build, "greeting")); err != nil || string(data) != "it's here" {
+	if data, err := os.ReadFile(filepath.Join(p.code.build, "greeting")); err != nil || string(data) != "it's here" {
 		t.Fatalf("the command found GREETING=%q, %v", data, err)
 	}
-	if git(t, p.build, "rev-parse", "--show-toplevel") != p.build || git(t, p.build, "check-ignore", ".crabbox/runs/x", ".land/result.json") != ".crabbox/runs/x\n.land/result.json" {
+	if git(t, p.code.build, "rev-parse", "--show-toplevel") != p.code.build || git(t, p.code.build, "check-ignore", ".crabbox/runs/x", ".land/result.json") != ".crabbox/runs/x\n.land/result.json" {
 		t.Fatal("the build root isn't a git repository that ignores .crabbox/ and .land/")
 	}
 	if off := standInCalls(t, "sudo systemctl disable"); !slices.Equal(off, []string{"sudo systemctl disable --now apt-daily.timer apt-daily-upgrade.timer"}) {
@@ -99,7 +99,7 @@ func TestTheBoxScriptRemovesWhatTheSyncDidNotList(t *testing.T) {
 	newFake(t)
 	p, _, _ := testPool(t)
 	b := claimed(t, p, "cpx42")
-	root := p.build
+	root := p.code.build
 	write(t, filepath.Join(root, ".gitignore"), "/built/\n")
 	write(t, filepath.Join(root, "data/file"), "in the tree")
 	run(t, b, "true") // the box's index names data/file
@@ -143,7 +143,7 @@ func TestTheBoxScriptKeepsTheTimesTheBoxGave(t *testing.T) {
 	newFake(t)
 	p, _, _ := testPool(t)
 	b := claimed(t, p, "cpx42")
-	kept, changed := filepath.Join(p.build, "kept.go"), filepath.Join(p.build, "changed.go")
+	kept, changed := filepath.Join(p.code.build, "kept.go"), filepath.Join(p.code.build, "changed.go")
 	write(t, kept, "kept")
 	write(t, changed, "old")
 	mtime := func(path string) time.Time {
@@ -181,14 +181,14 @@ func TestRunNamesTheStageItStoppedAt(t *testing.T) {
 	f := newFake(t)
 	p, _, _ := testPool(t)
 	b := claimed(t, p, "cpx42")
-	result, stale := filepath.Join(p.root, ".land/result.json"), filepath.Join(p.build, ".land/result.json")
+	result, stale := filepath.Join(p.root, ".land/result.json"), filepath.Join(p.code.build, ".land/result.json")
 	write(t, stale, "an earlier command's")
 	p.cfg.Stages.Prepare = "echo preparing; exit 3"
 	var stage *StageError
 	if err := b.Run(t.Context(), []string{".land"}, "touch", "ran"); !errors.As(err, &stage) || stage.Stage != "prepare" || stage.Log != "preparing" {
 		t.Fatalf("a failed prepare gave %v (%+v)", err, stage)
 	}
-	if _, err := os.Stat(filepath.Join(p.build, "ran")); err == nil {
+	if _, err := os.Stat(filepath.Join(p.code.build, "ran")); err == nil {
 		t.Fatal("the command ran after a failed prepare")
 	}
 	if _, err := os.Stat(result); err == nil {
@@ -226,13 +226,13 @@ func TestTheBoxScriptSurvivesADirectoryBecomingAFile(t *testing.T) {
 	newFake(t)
 	p, _, _ := testPool(t)
 	b := claimed(t, p, "cpx42")
-	write(t, filepath.Join(p.build, "sub", "a"), "a")
-	write(t, filepath.Join(p.build, "sub", "b"), "b")
+	write(t, filepath.Join(p.code.build, "sub", "a"), "a")
+	write(t, filepath.Join(p.code.build, "sub", "b"), "b")
 	run(t, b, "true")
-	if err := os.RemoveAll(filepath.Join(p.build, "sub")); err != nil {
+	if err := os.RemoveAll(filepath.Join(p.code.build, "sub")); err != nil {
 		t.Fatal(err)
 	}
-	write(t, filepath.Join(p.build, "sub"), "now a file")
+	write(t, filepath.Join(p.code.build, "sub"), "now a file")
 	run(t, b, "true")
 	run(t, b, "true")
 }
@@ -243,10 +243,10 @@ func TestTheBoxScriptRunsWhenItCannotGiveTimesBack(t *testing.T) {
 	newFake(t)
 	p, _, stderr := testPool(t)
 	b := claimed(t, p, "cpx42")
-	write(t, filepath.Join(p.build, ".land.yaml"), "")
-	write(t, filepath.Join(p.build, "a"), "old")
+	write(t, filepath.Join(p.code.build, ".land.yaml"), "")
+	write(t, filepath.Join(p.code.build, "a"), "old")
 	run(t, b, "true")
-	write(t, filepath.Join(p.build, "a"), "new")
+	write(t, filepath.Join(p.code.build, "a"), "new")
 	failing := realDir(t)
 	t.Setenv("PATH", failing+string(os.PathListSeparator)+os.Getenv("PATH"))
 	refuse := func(name string) {
@@ -259,19 +259,19 @@ func TestTheBoxScriptRunsWhenItCannotGiveTimesBack(t *testing.T) {
 	if err := b.Run(t.Context(), nil, "sh", "-c", "echo ran >ran"); err != nil {
 		t.Fatalf("a box command whose times couldn't be given back gave %v\n%s", err, stderr)
 	}
-	if _, err := os.Stat(filepath.Join(p.build, "ran")); err != nil {
+	if _, err := os.Stat(filepath.Join(p.code.build, "ran")); err != nil {
 		t.Fatalf("the command didn't run: %v", err)
 	}
 	if want := "land: could not restore file times: touch: a: Permission denied; the build may redo work\n"; !strings.Contains(stderr.String(), want) {
 		t.Fatalf("the box command said %q; want %q", stderr, want)
 	}
 	refuse("rm")
-	write(t, filepath.Join(p.build, ".git/crabbox/sync-manifest"), ".land.yaml\x00a\x00") // ran is stale
+	write(t, filepath.Join(p.code.build, ".git/crabbox/sync-manifest"), ".land.yaml\x00a\x00") // ran is stale
 	var stage *StageError
 	if err := b.Run(t.Context(), nil, "sh", "-c", "echo ran >again"); !errors.As(err, &stage) || stage.Stage != "script" {
 		t.Fatalf("a box command whose prune failed gave %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(p.build, "again")); err == nil {
+	if _, err := os.Stat(filepath.Join(p.code.build, "again")); err == nil {
 		t.Fatal("the command ran after the prune failed")
 	}
 }
@@ -292,12 +292,12 @@ func TestTheBoxScriptCommitsTheTreeAsHEAD(t *testing.T) {
 		}
 		return strings.Fields(string(data))[0]
 	}
-	write(t, filepath.Join(p.build, "a"), "a")
+	write(t, filepath.Join(p.code.build, "a"), "a")
 	first := sees()
 	if again := sees(); again != first {
 		t.Fatalf("the same tree moved HEAD from %s to %s", first, again)
 	}
-	write(t, filepath.Join(p.build, "a"), "changed")
+	write(t, filepath.Join(p.code.build, "a"), "changed")
 	if changed := sees(); changed == first {
 		t.Fatal("a changed tree kept HEAD")
 	}
@@ -311,7 +311,7 @@ func TestTheBoxScriptFollowsRandomTreeChanges(t *testing.T) {
 	newFake(t)
 	p, _, stderr := testPool(t)
 	b := claimed(t, p, "cpx42")
-	root := p.build
+	root := p.code.build
 	write(t, filepath.Join(root, ".land.yaml"), "")
 	run(t, b, "true")
 	// Every time the box recorded is before recorded.

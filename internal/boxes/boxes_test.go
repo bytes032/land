@@ -153,6 +153,9 @@ cd "$dir" && exec "$@"`,
 	"cloud-init": ``,
 }
 
+// recordCall is the shell, first in each stand-in but crabbox, that makes each of its calls a line of $CALLS.
+const recordCall = `printf '%s\n' "$(basename "$0") $*" >>"$CALLS"` + "\n"
+
 // fake is a test's crabbox, Hetzner project and boxes.
 type fake struct {
 	dir string
@@ -160,9 +163,9 @@ type fake struct {
 }
 
 // newFake puts the stand-ins first on PATH, each recording its calls in $CALLS, serves a fake Hetzner API over the
-// fake crabbox's project with one available snapshot of acme.api, image 1, and the server types fakeTypes, makes the
-// boxes' build roots and self-delete directories of the test's own, and gives the test a home of its own, so the
-// claims are its own. It fails the test if land runs crabbox stop, cp or list.
+// fake crabbox's project with one available snapshot of acme.api, image 1, and the server types fakeTypes, whose
+// boxes keep their build roots and self-delete in the fake's directory (fakeBox), and gives the test a home of its own,
+// so the claims are its own. It fails the test if land runs crabbox stop, cp or list.
 func newFake(t *testing.T) *fake {
 	t.Helper()
 	f := &fake{dir: realDir(t)}
@@ -177,10 +180,9 @@ func newFake(t *testing.T) *fake {
 		}
 	})
 	bin := realDir(t)
-	record := `printf '%s\n' "$(basename "$0") $*" >>"$CALLS"` + "\n"
 	for name, script := range standIns {
 		if name != "crabbox" {
-			script = record + script
+			script = recordCall + script
 		}
 		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+strings.TrimPrefix(script, "#!/bin/sh\n")+"\n"), 0o700); err != nil { //nolint:gosec // an executable stand-in
 			t.Fatal(err)
@@ -200,18 +202,17 @@ func newFake(t *testing.T) *fake {
 		t.Setenv(name, value)
 	}
 	f.write(t, "timers", "off\n")
-	vars := []*string{&boxRoot, &runDir, &hetznerAPI, &metadataURL}
-	old := make([]string, len(vars))
-	for i, v := range vars {
-		old[i] = *v
-	}
-	t.Cleanup(func() {
-		for i, v := range vars {
-			*v = old[i]
-		}
-	})
-	boxRoot, runDir, hetznerAPI, metadataURL = realDir(t), filepath.Join(realDir(t), "land"), api.URL, api.URL+"/hetzner/v1/metadata"
+	old := hetznerAPI
+	t.Cleanup(func() { hetznerAPI = old })
+	hetznerAPI = api.URL
 	return f
+}
+
+// fakeBox is the box code of the fake's boxes of repo, all on this machine: their build roots and self-delete in the
+// fake's directory, $FAKE_CRABBOX, and their metadata service on its API.
+func fakeBox(repo string) boxCode {
+	dir := os.Getenv("FAKE_CRABBOX")
+	return boxCode{build: filepath.Join(dir, "build", repo), run: filepath.Join(dir, "run", "land"), metadata: hetznerAPI + "/hetzner/v1/metadata"}
 }
 
 // realDir is a new temporary directory by a path without links, as the box script's `cd -P` sees it.
@@ -652,7 +653,7 @@ func testPool(t *testing.T) (p *pool, stdout, stderr *bytes.Buffer) {
 
 func poolAt(t *testing.T, root string, cfg *config.Config) (p *pool, stdout, stderr *bytes.Buffer) {
 	t.Helper()
-	p, err := newPool(t.Context(), root, cfg)
+	p, err := newPool(t.Context(), root, cfg, fakeBox)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -733,8 +734,8 @@ func TestAWorktreeKeepsItsBoxAndOthersGetTheirOwn(t *testing.T) {
 	f := newFake(t)
 	p, _, _ := testPool(t)
 	b := claimed(t, p, "cpx42")
-	if link, err := os.Readlink(filepath.Join(f.dir, "work", b.c.Lease, "api")); err != nil || link != p.build {
-		t.Fatalf("the lease's workspace links to %q, %v; want the build root %s", link, err, p.build)
+	if link, err := os.Readlink(filepath.Join(f.dir, "work", b.c.Lease, "api")); err != nil || link != p.code.build {
+		t.Fatalf("the lease's workspace links to %q, %v; want the build root %s", link, err, p.code.build)
 	}
 	if again := claimed(t, p, "cpx42"); again.c.Lease != b.c.Lease {
 		t.Fatalf("the second claim got %+v, want %+v", again.c, b.c)
@@ -777,7 +778,7 @@ func TestABoxWhoseImageLacksWhatLandNeedsIsRefused(t *testing.T) {
 	if err == nil || !strings.HasPrefix(err.Error(), "readying cbx_") || !strings.Contains(err.Error(), ": "+want) {
 		t.Fatalf("a claim of a box lacking two needs: %v; want readying <lease>: %s\n%s", err, want, stderr)
 	}
-	for _, made := range []string{p.build, filepath.Join(runDir, "auth")} {
+	for _, made := range []string{p.code.build, filepath.Join(p.code.run, "auth")} {
 		if _, err := os.Stat(made); err == nil {
 			t.Errorf("setup made %s before checking the box's image", made)
 		}
@@ -792,10 +793,10 @@ func TestABoxWhoseImageLacksWhatLandNeedsIsRefused(t *testing.T) {
 	f.api.noMetadata = false
 	f.api.mu.Unlock()
 	b := claimed(t, p, "cpx42")
-	if link, err := os.Readlink(filepath.Join(f.dir, "work", b.c.Lease, "api")); err != nil || link != p.build {
-		t.Fatalf("the lease's workspace links to %q, %v; want the build root %s", link, err, p.build)
+	if link, err := os.Readlink(filepath.Join(f.dir, "work", b.c.Lease, "api")); err != nil || link != p.code.build {
+		t.Fatalf("the lease's workspace links to %q, %v; want the build root %s", link, err, p.code.build)
 	}
-	if _, err := os.Stat(filepath.Join(runDir, "auth")); err != nil {
+	if _, err := os.Stat(filepath.Join(p.code.run, "auth")); err != nil {
 		t.Fatalf("a box lacking nothing has no self-delete: %v", err)
 	}
 }
@@ -952,10 +953,10 @@ func TestStatusNamesTheLeaseAndASparesDeadline(t *testing.T) {
 	env := "XDG_STATE_HOME=" + quote(filepath.Join(p.boxes(t)[b.c.Lease], "state")) + " CRABBOX_MAX_TTL=24h "
 	if want := b.c.Lease + "\t" + b.c.Slug + "\tcpx42\trunning\tthis worktree\n" +
 		env + "crabbox tunnel --provider hetzner --id " + b.c.Lease + " --local-port PORT PORT\n" +
-		env + "crabbox cp --provider hetzner --id " + b.c.Lease + " SANDBOX:" + p.build + "/PATH PATH\n"; stdout.String() != want {
+		env + "crabbox cp --provider hetzner --id " + b.c.Lease + " SANDBOX:" + p.code.build + "/PATH PATH\n"; stdout.String() != want {
 		t.Fatalf("status printed %q, want %q", stdout, want)
 	}
-	if err := Release(t.Context(), p.root, p.cfg); err != nil {
+	if err := p.release(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	stdout.Reset()
@@ -976,15 +977,15 @@ func TestLandBoxesRun(t *testing.T) {
 	t.Chdir(root)
 	ctx := t.Context()
 	var exit interface{ ExitCode() int }
-	if err := Main(ctx, []string{"run", "--", "sh", "-c", "[ \"$GREETING\" = \"it's here\" ] && exit 5"}); !errors.As(err, &exit) || exit.ExitCode() != 5 {
+	if err := boxesMain(ctx, []string{"run", "--", "sh", "-c", "[ \"$GREETING\" = \"it's here\" ] && exit 5"}, fakeBox); !errors.As(err, &exit) || exit.ExitCode() != 5 {
 		t.Fatalf("a command exiting 5 gave %v", err)
 	}
-	if err := Main(ctx, []string{"run", "--type", "ccx63", "--", "true"}); err == nil || !strings.Contains(err.Error(), "release") {
+	if err := boxesMain(ctx, []string{"run", "--type", "ccx63", "--", "true"}, fakeBox); err == nil || !strings.Contains(err.Error(), "release") {
 		t.Fatalf("--type ccx63 on a worktree holding a cpx42 gave %v", err)
 	}
 	write(t, filepath.Join(root, config.File), testConfig+"  prepare: exit 3\n")
 	var stage *StageError
-	if err := Main(ctx, []string{"run", "true"}); !errors.As(err, &stage) || stage.Stage != "prepare" || errors.As(err, &exit) {
+	if err := boxesMain(ctx, []string{"run", "true"}, fakeBox); !errors.As(err, &stage) || stage.Stage != "prepare" || errors.As(err, &exit) {
 		t.Fatalf("a failed prepare gave %v", err)
 	}
 	if err := Main(ctx, []string{"run"}); err == nil || !strings.Contains(err.Error(), "usage") {

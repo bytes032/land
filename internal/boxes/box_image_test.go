@@ -40,7 +40,7 @@ func onUbuntu(t *testing.T, version string) {
 	write(t, filepath.Join(root, ".crabbox.yaml"), "os: ubuntu:"+version+"\n")
 	git(t, root, "add", "-A")
 	git(t, root, "-c", "user.name=land", "-c", "user.email=land@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "init")
-	p, err := newPool(ctx, root, cfg)
+	p, err := newPool(ctx, root, cfg, hetznerBox)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,30 +88,31 @@ func onUbuntu(t *testing.T, version string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := p.onBox(ctx, ssh, `sudo cat `+runDir+`/created `+runDir+`/deadline; date +%s`, "")
+	dir := p.code.run
+	out, err := p.onBox(ctx, ssh, `sudo cat `+dir+`/created `+dir+`/deadline; date +%s`, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var created, deadline, now int64
 	if _, err := fmt.Sscan(out, &created, &deadline, &now); err != nil ||
 		(deadline+300-created)%3600 != 0 || deadline < now+900 || deadline > now+900+3600 {
-		t.Fatalf("after a box command, created, deadline and now are %q, %v; want the deadline 5 minutes before the "+
-			"first paid hour to end at least 15 minutes from now", out, err)
+		t.Fatalf("after a box command, created, deadline and now are %q, %v; want the first deadline, 5 minutes before "+
+			"the end of a paid hour, at least 15 minutes from now", out, err)
 	}
 
 	// Its deadline passed, a box something is connected to, this script's own session, stays another hour.
 	out, err = p.onBox(ctx, ssh, `set -eu
 passed=$(( $(date +%s) - 1 ))
-echo $passed | sudo tee `+runDir+`/deadline >/dev/null
-for i in $(seq 150); do [ "$(sudo cat `+runDir+`/deadline)" = $passed ] || break; sleep 1; done
-echo $(( $(sudo cat `+runDir+`/deadline) - passed ))`, "")
+echo $passed | sudo tee `+dir+`/deadline >/dev/null
+for i in $(seq 150); do [ "$(sudo cat `+dir+`/deadline)" = $passed ] || break; sleep 1; done
+echo $(( $(sudo cat `+dir+`/deadline) - passed ))`, "")
 	if err != nil || strings.TrimSpace(out) != "3600" {
 		t.Fatalf("a box in use, its deadline passed, moved it %q s on, %v; want 3600", out, err)
 	}
 
 	// Its deadline passed again, and its user's sessions ended, crabbox's connection among them, the box is idle.
 	if _, err := p.onBox(ctx, ssh, `set -eu
-echo $(( $(date +%s) - 1 )) | sudo tee `+runDir+`/deadline >/dev/null
+echo $(( $(date +%s) - 1 )) | sudo tee `+dir+`/deadline >/dev/null
 sudo systemd-run --quiet --on-active=3 loginctl terminate-user "$(id -un)"`, ""); err != nil {
 		t.Fatal(err)
 	}

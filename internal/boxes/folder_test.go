@@ -199,7 +199,7 @@ func TestLandRunsOnlyTheCrabboxVersionsItKnows(t *testing.T) {
 		runs    bool
 	}{{"0.77.0", false}, {"0.78.1", true}, {"0.79.1", true}, {"0.80.0", false}} {
 		f.write(t, "version", c.version+"\n")
-		_, err := newPool(t.Context(), root, cfg)
+		_, err := newPool(t.Context(), root, cfg, fakeBox)
 		switch {
 		case c.runs && err != nil:
 			t.Errorf("crabbox %s: %v", c.version, err)

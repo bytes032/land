@@ -94,17 +94,6 @@ func (p *pool) image(ctx context.Context, server int64, commit string) (image, e
 	return made, errors.Join(errs...)
 }
 
-// prepareImage readies a box built for a snapshot: no self-delete, nothing a new box shouldn't inherit (the builder's
-// lease expiry and authorized keys), and cloud-init to run again on each new box's first boot, with its own key and
-// SSH host keys.
-func prepareImage() string {
-	return stripSelfDelete() + `
-sudo rm -f /etc/crabbox/lease-expiry /root/.ssh/authorized_keys
-rm -f ~/.ssh/authorized_keys
-sudo cloud-init clean --logs
-sync`
-}
-
 // snapshot is `land boxes snapshot`: it builds the repository's snapshot at the trunk's green commit, or its tip when
 // none is green, or with head at the worktree's HEAD commit, whatever the worktree holds, with that commit's own
 // configuration, in a temporary checkout of it in the folder of the box it builds on, which goes after with the box,
@@ -164,7 +153,7 @@ func (p *pool) buildSnapshot(ctx context.Context, c claim, commit string) error 
 	if err != nil {
 		return err
 	}
-	if _, err := p.onBox(ctx, ssh, prepareImage(), ""); err != nil {
+	if _, err := p.onBox(ctx, ssh, p.code.prepareImage(), ""); err != nil {
 		return err
 	}
 	_, err = p.image(ctx, c.Server, commit)
