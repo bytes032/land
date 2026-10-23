@@ -20,7 +20,8 @@ Your box runs every build and test; your Mac only edits files and runs git. With
 
 - `land boxes run -- CMD` runs CMD at the box's build root and exits with its exit code. The first box command claims
   the worktree's box. Each command syncs the worktree, uncommitted changes included, removes files the worktree no
-  longer has, restores file times and runs the repository's `prepare` stage before CMD; a failed `prepare` stops it.
+  longer has, restores file times and runs the repository's `prepare` stage before CMD; a failed `prepare` stops it. If
+  the file times can't be restored, the command still runs, after a warning that the build may redo work.
 - `land boxes status` names your box's lease and prints the crabbox commands that forward a port of the box to your
   Mac or copy a file back from it. Copy them from there and fill in PORT or PATH. They run crabbox with your box's own
   state (`XDG_STATE_HOME`), without which crabbox doesn't know the box, and with `CRABBOX_MAX_TTL=24h`, without which

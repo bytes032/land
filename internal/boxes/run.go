@@ -59,6 +59,11 @@ func (b *box) run(ctx context.Context, prepare string, fetch []string, argv ...s
 // and records the tree CMD left and its files' times. It names each stage on stderr as it starts it, and says if it
 // stops before CMD (stages).
 //
+// A step that guards what CMD runs on stops the box command when it fails: the build root check, box.env, the apt
+// timers (whose apt-daily would take dpkg's lock from prepare), the lock, git init, the prune, the record before CMD
+// and prepare. Giving times back only keeps builds incremental, so a failure there warns and CMD still runs; a file it
+// couldn't touch keeps the copy's time, as it would without land. The record after CMD, likewise, only warns.
+//
 // crabbox prunes only what its previous sync listed, so a file the box got another way, from its image or an earlier
 // command, would outlive the worktree's deletion of it and enter the box's tree. The manifest is trusted only if it
 // lists .land.yaml, which every worktree has, and a path under a link, which the box's index can still name after the
@@ -127,14 +132,17 @@ record() {
       perl -MTime::HiRes=lstat -0lne 'my @s = lstat $_ or next; -l $_ or printf "%s\0%.9f\0", $_, $s[9]'; } \
     >.git/land-times.new && mv .git/land-times.new .git/land-times
 }
-if [ -f .git/land-times ] && IFS= read -r -d '' recorded <.git/land-times &&
-  git diff -z --name-only --no-renames "$recorded^{tree}" "$(git write-tree)" >.git/land-moved 2>/dev/null; then
-  perl -MTime::HiRes=utime -0lne '$. > 1 or next; chomp(my $time = <>); utime $time, $time, $_' .git/land-times
-else
-  : >.git/land-moved
-fi
-{ cat .git/land-moved && git diff -z --name-only --no-renames && git ls-files -z --others --exclude-standard; } |
-  perl -0 -ne 'chomp; print "$_\0" if -e $_' | xargs -0r touch -c --
+restore() {
+  if [ -f .git/land-times ] && IFS= read -r -d '' recorded <.git/land-times &&
+    git diff -z --name-only --no-renames "$recorded^{tree}" "$(git write-tree)" >.git/land-moved 2>/dev/null; then
+    perl -MTime::HiRes=utime -0lne '$. > 1 or next; chomp(my $time = <>); utime $time, $time, $_' .git/land-times
+  else
+    : >.git/land-moved
+  fi && { cat .git/land-moved && git diff -z --name-only --no-renames && git ls-files -z --others --exclude-standard; } |
+    perl -0 -ne 'chomp; print "$_\0" if -e $_' | xargs -0r touch -c --
+}
+failed=$(restore 2>&1) ||
+  printf 'land: could not restore file times: %s; the build may redo work\n' "${failed:-exit status $?}" >&2
 record
 ` + prepare + `exec 9>&-
 trap - EXIT
