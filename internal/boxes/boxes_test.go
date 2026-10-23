@@ -93,14 +93,19 @@ run)
 esac
 `
 
-// standIns are fakeCrabbox and what a box runs that a Mac lacks or mustn't run: sudo runs its command; systemctl's apt
-// timers are on while $TIMERS holds "on", and its disable turns them off, while the other units are files in $UNITS,
-// which stop removes; systemd-run makes a timer such a file, and runs any other unit's command at once, in its
+// standIns are fakeCrabbox and what a box runs that a Mac lacks or mustn't run: sudo runs its command, but with -n
+// fails while the fake crabbox's sudo-asks exists, as a sudo that wants a password does; systemctl's apt timers are on
+// while $TIMERS holds "on", and its disable turns them off, while the other units are files in $UNITS, which stop
+// removes; systemd-run, systemd 255's, makes a timer such a file, and runs any other unit's command at once, in its
 // working directory, refusing a command line with ${ or $$ that systemd would expand, unless told not to; flock locks
-// nothing, and cloud-init does nothing.
+// nothing, ss finds no connection, and cloud-init does nothing.
 var standIns = map[string]string{
 	"crabbox": fakeCrabbox,
-	"sudo":    `[ "$1" != -n ] || shift; exec "$@"`,
+	"sudo": `if [ "$1" = -n ]; then
+  [ ! -e "$FAKE_CRABBOX/sudo-asks" ] || { echo 'sudo: a password is required' >&2; exit 1; }
+  shift
+fi
+exec "$@"`,
 	"systemctl": `[ "$1" != --quiet ] || shift
 case $1/$2 in
 is-enabled/apt-daily* | is-active/apt-daily*) [ "$(cat "$TIMERS")" = on ] ;;
@@ -117,6 +122,7 @@ while [ $# -gt 0 ]; do
   --on-calendar) timer=$2; shift 2 ;;
   --uid | --gid) shift 2 ;;
   --expand-environment=no) expand=no; shift ;;
+  --help) echo '     --expand-environment=BOOL'; exit 0 ;;
   --*) shift ;;
   *) break ;;
   esac
@@ -131,6 +137,7 @@ if [ -n "$timer" ]; then echo "$*" >"$UNITS/$unit.timer"; exit 0; fi
 [ "$1 $2" != "bash -lc" ] || { shift 2; set -- bash -c "$@"; }
 cd "$dir" && exec "$@"`,
 	"flock":      ``,
+	"ss":         ``,
 	"cloud-init": ``,
 }
 
@@ -284,7 +291,7 @@ const testToken = "test-token-0123456789abcdef"
 // available, or unavailable, failed, when failing is set; a deleted image is a line of the fake crabbox's
 // deleted-images, which no box boots any more. Every call that changes something is a line of changes, "METHOD /path",
 // and each read finding a new snapshot available is "available /images/ID". Every deletion fails while deleteFails is
-// set. imaged runs as a snapshot starts; the metadata service names instance.
+// set. imaged runs as a snapshot starts; the metadata service names instance, unless noMetadata is set, as off Hetzner.
 type fakeHetzner struct {
 	mu          sync.Mutex
 	servers     string
@@ -297,6 +304,7 @@ type fakeHetzner struct {
 	changes     []string
 	imaged      func()
 	instance    int64
+	noMetadata  bool
 }
 
 // fakeKey is an SSH key of the fake project's, with its fingerprint, which Hetzner computes.
@@ -373,6 +381,10 @@ func (f *fakeHetzner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if r.URL.Path == "/hetzner/v1/metadata/instance-id" {
+		if f.noMetadata {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		_, _ = fmt.Fprint(w, f.instance)
 		return
 	}
@@ -674,6 +686,43 @@ func TestAWorktreeKeepsItsBoxAndOthersGetTheirOwn(t *testing.T) {
 	}
 	if git(t, p.root, "check-ignore", ".crabbox/captures/run.tar.gz") != ".crabbox/captures/run.tar.gz" {
 		t.Fatal("the worktree doesn't ignore crabbox's failure bundles")
+	}
+}
+
+// A new box whose image lacks what land's box code needs stops setup before it does anything else on the box, naming
+// all it lacks at once, and the box goes with all it made; a box lacking nothing is readied as ever.
+func TestABoxWhoseImageLacksWhatLandNeedsIsRefused(t *testing.T) {
+	f := newFake(t)
+	f.write(t, "sudo-asks", "")
+	f.api.mu.Lock()
+	f.api.noMetadata = true
+	f.api.mu.Unlock()
+	p, _, stderr := testPool(t)
+	_, err := p.claim(t.Context(), "cpx42")
+	want := "this box's image lacks sudo without a password, Hetzner's metadata service; land's box code needs them (see .crabbox.yaml os)"
+	if err == nil || !strings.HasPrefix(err.Error(), "readying cbx_") || !strings.Contains(err.Error(), ": "+want) {
+		t.Fatalf("a claim of a box lacking two needs: %v; want readying <lease>: %s\n%s", err, want, stderr)
+	}
+	for _, made := range []string{p.build, filepath.Join(runDir, "auth")} {
+		if _, err := os.Stat(made); err == nil {
+			t.Errorf("setup made %s before checking the box's image", made)
+		}
+	}
+	if servers, keys := f.servers(t), f.keys(t); len(servers) != 0 || len(keys) != 0 || len(p.claims(t)) != 0 || len(p.folders(t)) != 0 {
+		t.Fatalf("after the refusal: servers %v, keys %v, claims %v, folders %q; want none", servers, keys, p.claims(t), p.folders(t))
+	}
+	if err := os.Remove(filepath.Join(f.dir, "sudo-asks")); err != nil {
+		t.Fatal(err)
+	}
+	f.api.mu.Lock()
+	f.api.noMetadata = false
+	f.api.mu.Unlock()
+	b := claimed(t, p, "cpx42")
+	if link, err := os.Readlink(filepath.Join(f.dir, "work", b.c.Lease, "api")); err != nil || link != p.build {
+		t.Fatalf("the lease's workspace links to %q, %v; want the build root %s", link, err, p.build)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "auth")); err != nil {
+		t.Fatalf("a box lacking nothing has no self-delete: %v", err)
 	}
 }
 

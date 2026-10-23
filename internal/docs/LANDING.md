@@ -39,6 +39,9 @@ Your box runs every build and test; your Mac only edits files and runs git. With
 - New boxes boot the repository's newest snapshot. With none, the claim stops and names `land boxes snapshot`, which
   builds one at the green commit, with that commit's `.land.yaml`, whatever your worktree holds. `--head` builds it at
   your HEAD commit instead, with its `.land.yaml`: for the repository's first snapshot, before its adoption lands.
+- land checks that a new box's image (the snapshot, or, for `land boxes snapshot`, the Ubuntu that `os:` in
+  `.crabbox.yaml` names) has what land's box code needs, and refuses one that lacks any: it names all it lacks and
+  deletes the box. Each land release is tested on crabbox's Ubuntu 24.04 and 26.04.
 - At Hetzner's server limit, a claim says once who holds the repository's boxes, then retries every 30 s for up to 3 h.
 
 ## Ready to land
