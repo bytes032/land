@@ -24,7 +24,7 @@ func (l *lander) push(ctx context.Context, landing, onto, message string, verdic
 		if refused == nil {
 			return landing, verdict, nil
 		}
-		moved, err := l.fetch(ctx)
+		moved, err := l.cfg.FetchTrunk(ctx, l.root)
 		if err != nil {
 			return "", check.Outcome{}, l.unamend(ctx, errors.Join(refused, err))
 		}

@@ -85,14 +85,14 @@ func Main(ctx context.Context, args []string) error {
 		if len(args) > 1 {
 			return errors.New("usage: land review check")
 		}
-		return check(ctx, root, cfg.Trunk, exclude, os.Stdout)
+		return check(ctx, root, cfg, exclude, os.Stdout)
 	}
 	return runReview(ctx, root, cfg, exclude, args, os.Stdout, os.Stderr)
 }
 
 // check is `land review check`.
-func check(ctx context.Context, root, trunk string, exclude []string, out io.Writer) error {
-	base, err := changeBase(ctx, root, trunk)
+func check(ctx context.Context, root string, cfg *config.Config, exclude []string, out io.Writer) error {
+	base, err := changeBase(ctx, root, cfg)
 	if err != nil {
 		return err
 	}
@@ -117,7 +117,7 @@ func runReview(ctx context.Context, root string, cfg *config.Config, exclude, ar
 	if dirty != "" {
 		return fmt.Errorf("commit your changes first: the review covers HEAD's change\n%s", dirty)
 	}
-	base, err := changeBase(ctx, root, cfg.Trunk)
+	base, err := changeBase(ctx, root, cfg)
 	if err != nil {
 		return err
 	}
@@ -174,14 +174,13 @@ func runReview(ctx context.Context, root string, cfg *config.Config, exclude, ar
 	return nil
 }
 
-// changeBase fetches the trunk into refs/worktree/<trunk>, the worktree's own ref, so no other worktree's fetch moves
-// it, and returns HEAD's merge-base with it. The empty --refmap leaves the shared remote-tracking ref alone.
-func changeBase(ctx context.Context, root, trunk string) (string, error) {
-	ref := "refs/worktree/" + trunk
-	if _, err := git(ctx, root, nil, "fetch", "--quiet", "--refmap=", "origin", "refs/heads/"+trunk+":"+ref); err != nil {
+// changeBase is HEAD's merge-base with the trunk, freshly fetched as the landing fetches it (config.FetchTrunk).
+func changeBase(ctx context.Context, root string, cfg *config.Config) (string, error) {
+	trunk, err := cfg.FetchTrunk(ctx, root)
+	if err != nil {
 		return "", err
 	}
-	base, err := git(ctx, root, nil, "merge-base", "HEAD", ref)
+	base, err := git(ctx, root, nil, "merge-base", "HEAD", trunk)
 	return strings.TrimSpace(base), err
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/bytes032/land/internal/config"
 	"github.com/bytes032/land/internal/proc"
+	"github.com/bytes032/land/internal/stage"
 	"github.com/bytes032/land/internal/verdict"
 )
 
@@ -162,7 +163,7 @@ sudo systemctl stop land-warm 2>/dev/null || true
 rm -f .git/land-warm
 sudo systemd-run --quiet --collect --expand-environment=no --unit land-warm --uid "$(id -u)" --gid "$(id -g)" \
   --working-directory "$PWD" \
-  bash -lc 'bash -eo pipefail -c "$1" land bash -eo pipefail -c "$2" land; echo $? >.git/land-warm' land "$box" "$warm"`
+  bash -lc '` + stage.Bash + ` "$1" land ` + stage.Bash + ` "$2" land; echo $? >.git/land-warm' land "$box" "$warm"`
 }
 
 // spare makes the box c, which the worktree releases, a spare: it sets its deadline, 5 minutes before its next paid
@@ -235,15 +236,15 @@ func (p *pool) spare(ctx context.Context, c claim) (time.Time, error) {
 
 // green is the commit spares warm and snapshots are built at: the trunk's green commit, or its tip when none is green.
 func (p *pool) green(ctx context.Context) (string, error) {
-	ref := "refs/worktree/" + p.cfg.Trunk // the worktree's own, as the landing's fetch
-	if _, err := p.git(ctx, "fetch", "--quiet", "--refmap=", "origin", "refs/heads/"+p.cfg.Trunk+":"+ref); err != nil {
+	tip, err := p.cfg.FetchTrunk(ctx, p.root)
+	if err != nil {
 		return "", err
 	}
 	f, err := p.forge(ctx, p.root)
 	if err != nil {
 		return "", err
 	}
-	sha, _, err := verdict.GreenCommit(ctx, f, p.root, ref)
+	sha, _, err := verdict.GreenCommit(ctx, f, p.root, tip)
 	return sha, err
 }
 

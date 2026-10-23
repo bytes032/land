@@ -15,6 +15,7 @@ import (
 	"github.com/bytes032/land/internal/boxes"
 	"github.com/bytes032/land/internal/config"
 	"github.com/bytes032/land/internal/forge"
+	"github.com/bytes032/land/internal/stage"
 )
 
 // Dir is where the box half writes the result file and each check's log, relative to the repository root on the box
@@ -93,7 +94,7 @@ while [ $# -ge 2 ]; do
 	i=$((i + 1)) name=$1 run=$2
 	shift 2
 	code=0
-	bash -eo pipefail -c "$run" land > ".land/$i.log" 2>&1 < /dev/null || code=$?
+	` + stage.Bash + ` "$run" land > ".land/$i.log" 2>&1 < /dev/null || code=$?
 	if [ "$code" = 0 ]; then
 		echo "land: check $name passed" >&2
 	else

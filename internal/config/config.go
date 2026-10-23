@@ -10,13 +10,14 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/bytes032/land/internal/proc"
 )
 
 // File is the configuration's name at the repository root.
@@ -221,14 +222,28 @@ func (c *Config) check() error {
 	return nil
 }
 
+// FetchTrunk fetches origin's trunk into refs/worktree/<trunk>, a ref of root's worktree's own that no other worktree's
+// fetch moves, refusing a trunk that moved backward, and returns its commit. The landing, its review's change base and
+// a spare's green commit all start from it. An empty --refmap leaves the shared remote-tracking branch alone.
+func (c *Config) FetchTrunk(ctx context.Context, root string) (string, error) {
+	ref := "refs/worktree/" + c.Trunk
+	var stderr bytes.Buffer
+	if err := proc.Run(ctx, proc.Spec{Argv: []string{"git", "-C", root, "fetch", "--quiet", "--refmap=", "origin", "refs/heads/" + c.Trunk + ":" + ref},
+		Stderr: &stderr}); err != nil {
+		return "", fmt.Errorf("fetching %s: %w: %s", c.Trunk, err, strings.TrimSpace(stderr.String()))
+	}
+	out, err := proc.Output(ctx, proc.Spec{Argv: []string{"git", "-C", root, "rev-parse", "--verify", ref + "^{commit}"}})
+	return strings.TrimSpace(out), err
+}
+
 // RepoName is the repository's name, <owner>.<name>, from root's origin URL: github.com/acme/api is acme.api. It names
 // the state directory, the build root on the box and the snapshot label.
 func RepoName(ctx context.Context, root string) (string, error) {
-	out, err := exec.CommandContext(ctx, "git", "-C", root, "remote", "get-url", "origin").Output()
+	out, err := proc.Output(ctx, proc.Spec{Argv: []string{"git", "-C", root, "remote", "get-url", "origin"}})
 	if err != nil {
 		return "", fmt.Errorf("the origin remote's URL: %w", err)
 	}
-	return repoName(strings.TrimSpace(string(out)))
+	return repoName(strings.TrimSpace(out))
 }
 
 func repoName(remote string) (string, error) {
