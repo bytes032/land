@@ -14,6 +14,7 @@ land lands an agent's work on a repository's trunk. The design and its reasons a
 - `go run . <subcommand> …`: run from source.
 - Before every commit: `gofmt -l .` prints nothing, `go vet ./...` and `go test ./...` pass.
 - `go test -tags crabboxreal ./internal/boxes/`: runs the real crabbox (macOS, Docker). It must pass on a crabbox version before the supported range widens to it.
+- `go test -tags boximage -count=1 -v -timeout 30m -run TestLandsBoxCodeRunsOnUbuntu ./internal/boxes/`, with `HCLOUD_TOKEN` set: runs land's box code (setup and its image check, a box command, rearm, the self-delete) on real Hetzner boxes from crabbox's `os: ubuntu:24.04` and `ubuntu:26.04`, a few cents' worth, and deletes all it made. It must pass before every release.
 - To try a fix inside an adopting repository: `go build -o /tmp/land-dev .` and run `/tmp/land-dev` there instead of `scripts/land`.
 
 ## Code
@@ -30,4 +31,4 @@ Drive a module through its interface and assert what a caller sees. Each test mu
 ## Commits and releases
 
 - Conventional Commits (`fix(boxes): …`); the body says what and why.
-- A release is a tag `vX.Y.Z` on `main`, pushed to GitHub: patch for fixes, minor for new behaviour or `.land.yaml` keys. Never move or reuse a tag; the module proxy keeps the first commit it saw for it. Adopting repositories take it by setting `version:` in `.land.yaml` and running `land docs`.
+- A release is a tag `vX.Y.Z` on `main`, pushed to GitHub once the `boximage` test passes on it: patch for fixes, minor for new behaviour or `.land.yaml` keys. Never move or reuse a tag; the module proxy keeps the first commit it saw for it. Adopting repositories take it by setting `version:` in `.land.yaml` and running `land docs`.
