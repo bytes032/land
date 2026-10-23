@@ -601,7 +601,8 @@ func (p *pool) warmup(ctx context.Context, c claim, image string) (claim, string
 	return c, "", nil
 }
 
-// setup readies a new box: crabbox's workspace for its lease becomes a link to the build root, so that every box
+// setup readies a new box: first it checks that the box's image has all land's box code needs (needs), failing with
+// all it lacks at once; then crabbox's workspace for its lease becomes a link to the build root, so that every box
 // builds at the same path whatever its lease; the box drops the SSH keys of other crabbox leases, which a box from a
 // snapshot of a spare inherits; and it gets its self-delete.
 func (p *pool) setup(ctx context.Context, c claim, workspace string) error {
@@ -614,6 +615,7 @@ func (p *pool) setup(ctx context.Context, c claim, workspace string) error {
 		return err
 	}
 	script := `set -eu
+` + needs() + `
 sudo install -d -o "$(id -un)" -g "$(id -gn)" ` + quote(p.build) + `
 mkdir -p ` + quote(path.Dir(workspace)) + `
 ln -s ` + quote(p.build) + ` ` + quote(workspace) + `
@@ -621,8 +623,33 @@ for keys in ~/.ssh/authorized_keys /root/.ssh/authorized_keys; do
   if sudo test -f "$keys"; then sudo sed -i -e '/ crabbox ` + c.Lease + `$/b' -e '/ crabbox cbx_[0-9a-f]\{12\}$/d' "$keys"; fi
 done
 ` + install
-	_, err = p.onBox(ctx, ssh, script, token)
+	out, err := p.onBox(ctx, ssh, script, token)
+	if lacks := strings.TrimSpace(out); err != nil && lacks != "" {
+		return fmt.Errorf("this box's image lacks %s; land's box code needs them (see .crabbox.yaml os)", strings.ReplaceAll(lacks, "\n", ", "))
+	}
 	return err
+}
+
+// needs is the shell that stops a new box, printing a line on stdout, where nothing else of setup's script prints, for
+// each thing its image lacks that land's box code uses: /bin/bash, which runs every script of land's; perl with
+// Time::HiRes, git, flock and xargs (the box script); sed (setup); grep, ss and curl (the self-delete); tar (fetch);
+// systemctl, and systemd-run with systemd 254's --expand-environment (the self-delete's timer, the warm-up, apt's
+// timers); cloud-init (a snapshot's build); sudo without a password, which every root step takes; a /run/land whose
+// scripts bash runs as root, wherever /run forbids executing them; and Hetzner's metadata service, which names the
+// server the self-delete deletes. coreutils, which every image has, aside.
+func needs() string {
+	return `lacks=$(
+  for cmd in /bin/bash git flock xargs sed grep ss curl tar systemctl cloud-init; do command -v $cmd >/dev/null || echo $cmd; done
+  perl -MTime::HiRes -e 1 2>/dev/null || echo "perl with Time::HiRes"
+  systemd-run --help 2>/dev/null | grep -q -e --expand-environment || echo "systemd-run with --expand-environment (systemd 254)"
+  if ! sudo -n true 2>/dev/null; then echo "sudo without a password"
+  elif ! sudo -n bash -c 'mkdir -p ` + runDir + ` && echo : >` + runDir + `/needs && bash ` + runDir + `/needs' 2>/dev/null; then
+    echo "a ` + runDir + ` whose scripts bash runs"
+  fi
+  ! command -v curl >/dev/null || curl -fsS --max-time 10 -o /dev/null ` + metadataURL + `/instance-id 2>/dev/null ||
+    echo "Hetzner's metadata service"
+)
+if [ -n "$lacks" ]; then echo "$lacks"; exit 1; fi`
 }
 
 // ssh is the SSH command crabbox prints for the box c, run in the pool's worktree, whose checkout crabbox's claim of
