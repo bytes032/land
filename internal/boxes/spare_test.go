@@ -51,7 +51,7 @@ func offTheHour() time.Time { return time.Now().Truncate(time.Hour).Add(-100 * t
 // armed is whether the box is armed as a spare: the flag its self-delete and rearm read, and its server's label.
 func armed(t *testing.T, f *fake, lease string) (file, label bool) {
 	t.Helper()
-	_, err := os.Stat(filepath.Join(runDir, "spare"))
+	_, err := os.Stat(filepath.Join(fakeBox("acme.api").run, "spare"))
 	_, label = f.servers(t)[lease].Labels[deadlineLabel]
 	return err == nil, label
 }
@@ -80,10 +80,10 @@ func TestASpareKeepsItsDeadlineUntilAClaimClearsIt(t *testing.T) {
 	p, stdout, _ := testPool(t)
 	at(t, p, created, created.Add(80*time.Minute))
 	b := claimed(t, p, "cpx42")
-	if info, err := os.Stat(filepath.Join(runDir, "auth")); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(filepath.Join(p.code.run, "auth")); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("the box's token: %v, %v; want a file only its owner reads", info, err)
 	}
-	if data, err := os.ReadFile(filepath.Join(runDir, "auth")); err != nil || string(data) != "Authorization: Bearer "+testToken+"\n" {
+	if data, err := os.ReadFile(filepath.Join(p.code.run, "auth")); err != nil || string(data) != "Authorization: Bearer "+testToken+"\n" {
 		t.Fatalf("the box's token file holds %q, %v", data, err)
 	}
 	if _, err := os.Stat(filepath.Join(os.Getenv("UNITS"), "land-self-delete.timer")); err != nil {
@@ -93,7 +93,7 @@ func TestASpareKeepsItsDeadlineUntilAClaimClearsIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	unix := strconv.FormatInt(created.Add(115*time.Minute).Unix(), 10)
-	if data, err := os.ReadFile(filepath.Join(runDir, "deadline")); err != nil || strings.TrimSpace(string(data)) != unix {
+	if data, err := os.ReadFile(filepath.Join(p.code.run, "deadline")); err != nil || strings.TrimSpace(string(data)) != unix {
 		t.Fatalf("the box's deadline is %q, %v; want %s, 5 minutes before its second paid hour ends", data, err, unix)
 	}
 	if label := f.servers(t)[b.c.Lease].Labels[deadlineLabel]; label != unix {
@@ -263,10 +263,11 @@ func TestTheSelfDeleteDeletesTheBoxOnlyAfterItsDeadline(t *testing.T) {
 	f.write(t, "servers", `{"id":42,"name":"crabbox-box","status":"running","labels":{"crabbox":"true"}}`+"\n")
 	f.write(t, "keys", `{"id":7,"name":"crabbox-cbx-00000000002a"}`+"\n")
 	f.api.instance = 42
-	write(t, filepath.Join(runDir, "auth"), "Authorization: Bearer "+testToken+"\n")
-	write(t, filepath.Join(runDir, "ssh-keys"), "7\n")
+	box := fakeBox("acme.api")
+	write(t, filepath.Join(box.run, "auth"), "Authorization: Bearer "+testToken+"\n")
+	write(t, filepath.Join(box.run, "ssh-keys"), "7\n")
 	script := filepath.Join(t.TempDir(), "self-delete")
-	write(t, script, selfDeleteScript())
+	write(t, script, box.selfDeleteScript())
 	now := time.Now().Unix()
 	for _, c := range []struct {
 		name, deadline string
@@ -277,7 +278,7 @@ func TestTheSelfDeleteDeletesTheBoxOnlyAfterItsDeadline(t *testing.T) {
 		{"a deadline passed", strconv.FormatInt(now-1, 10), []string{"DELETE /ssh_keys/7", "DELETE /servers/42"}},
 	} {
 		if c.deadline != "" {
-			write(t, filepath.Join(runDir, "deadline"), c.deadline+"\n")
+			write(t, filepath.Join(box.run, "deadline"), c.deadline+"\n")
 		}
 		if out, err := exec.Command("bash", script).CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v\n%s", c.name, err, out)
@@ -310,7 +311,7 @@ func TestASpareWarmsAtTheGreenCommitAndRefreshesAStaleSnapshot(t *testing.T) {
 	if heads := f.lines(t, "heads", green); len(heads) != 1 {
 		t.Fatalf("crabbox ran from checkouts at %q; want one at the green commit %s", f.lines(t, "heads", ""), green)
 	}
-	if data, err := os.ReadFile(filepath.Join(p.build, "warmed")); err != nil || string(data) != "warmed it's here\n" {
+	if data, err := os.ReadFile(filepath.Join(p.code.build, "warmed")); err != nil || string(data) != "warmed it's here\n" {
 		t.Fatalf("the warm-up left %q, %v; want the green commit's, with box.env's GREETING", data, err)
 	}
 	if len(started) != 7 || started[0] != "warm" || started[1] != "acme.api" || started[2] != b.c.Lease || started[4] != green || started[5] != "true" {
@@ -318,13 +319,13 @@ func TestASpareWarmsAtTheGreenCommitAndRefreshesAStaleSnapshot(t *testing.T) {
 	}
 	var violations []string
 	f.api.imaged = func() {
-		for _, path := range []string{runDir, filepath.Join(os.Getenv("UNITS"), "land-self-delete.timer")} {
+		for _, path := range []string{p.code.run, filepath.Join(os.Getenv("UNITS"), "land-self-delete.timer")} {
 			if _, err := os.Stat(path); err == nil {
 				violations = append(violations, path)
 			}
 		}
 	}
-	if err := warmMain(t.Context(), started[1:]); err != nil {
+	if err := warmMain(t.Context(), started[1:], fakeBox); err != nil {
 		t.Fatal(err)
 	}
 	if len(violations) > 0 {
@@ -339,8 +340,8 @@ func TestASpareWarmsAtTheGreenCommitAndRefreshesAStaleSnapshot(t *testing.T) {
 	}
 	unix := strconv.FormatInt(spare.Deadline.Unix(), 10)
 	for path, want := range map[string]string{
-		filepath.Join(runDir, "auth"):     "Authorization: Bearer " + testToken + "\n",
-		filepath.Join(runDir, "deadline"): unix + "\n",
+		filepath.Join(p.code.run, "auth"):     "Authorization: Bearer " + testToken + "\n",
+		filepath.Join(p.code.run, "deadline"): unix + "\n",
 	} {
 		if data, err := os.ReadFile(path); err != nil || string(data) != want {
 			t.Errorf("after the refresh, %s holds %q, %v; want %q", path, data, err, want)
@@ -359,7 +360,7 @@ func TestABoxWithoutItsSelfDeleteIsNoSpare(t *testing.T) {
 	p.background = func(string, ...string) error { return nil }
 	at(t, p, offTheHour(), offTheHour().Add(30*time.Minute))
 	b := claimed(t, p, "")
-	if err := os.RemoveAll(runDir); err != nil {
+	if err := os.RemoveAll(p.code.run); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(filepath.Join(os.Getenv("UNITS"), "land-self-delete.timer")); err != nil {
@@ -411,10 +412,10 @@ func greenWorld(t *testing.T, trunk, branch string) (p *pool, green string) {
 	return p, green
 }
 
-// readDeadline is the box's deadline in Unix seconds.
+// readDeadline is the deadline of the fake's box in Unix seconds.
 func readDeadline(t *testing.T) int64 {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(runDir, "deadline"))
+	data, err := os.ReadFile(filepath.Join(fakeBox("acme.api").run, "deadline"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,12 +426,14 @@ func readDeadline(t *testing.T) int64 {
 	return d
 }
 
-// A held box's deadline is 5 minutes before the first of its paid hours to end at least 15 minutes from now, counted
-// from its creation, so that one nobody uses ends before Hetzner bills another hour for it; a spare's stays as set.
+// A held box's deadline is the first one, 5 minutes before the end of one of its paid hours, counted from its
+// creation, at least 15 minutes from now, so that one nobody uses ends before Hetzner bills another hour for it; a
+// spare's stays as set.
 func TestAHeldBoxEndsBeforeTheNextPaidHourItHasntUsed(t *testing.T) {
 	newFake(t)
+	box := fakeBox("acme.api")
 	script := filepath.Join(t.TempDir(), "rearm")
-	write(t, script, rearmScript())
+	write(t, script, box.rearmScript())
 	now := time.Now().Unix()
 	for _, c := range []struct {
 		name      string
@@ -444,11 +447,11 @@ func TestAHeldBoxEndsBeforeTheNextPaidHourItHasntUsed(t *testing.T) {
 		{"a spare", 600, 42, true},
 	} {
 		created := now - c.age
-		write(t, filepath.Join(runDir, "created"), strconv.FormatInt(created, 10)+"\n")
-		write(t, filepath.Join(runDir, "deadline"), strconv.FormatInt(created+42, 10)+"\n")
-		_ = os.Remove(filepath.Join(runDir, "spare"))
+		write(t, filepath.Join(box.run, "created"), strconv.FormatInt(created, 10)+"\n")
+		write(t, filepath.Join(box.run, "deadline"), strconv.FormatInt(created+42, 10)+"\n")
+		_ = os.Remove(filepath.Join(box.run, "spare"))
 		if c.spare {
-			write(t, filepath.Join(runDir, "spare"), "")
+			write(t, filepath.Join(box.run, "spare"), "")
 		}
 		if out, err := exec.Command("bash", script).CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v\n%s", c.name, err, out)
@@ -466,8 +469,9 @@ func TestABoxInUseOutlivesItsDeadlineUnlessItIsASpare(t *testing.T) {
 	f.write(t, "servers", `{"id":42,"name":"crabbox-box","status":"running","labels":{"crabbox":"true"}}`+"\n")
 	f.write(t, "keys", `{"id":7,"name":"crabbox-cbx-00000000002a"}`+"\n")
 	f.api.instance = 42
-	write(t, filepath.Join(runDir, "auth"), "Authorization: Bearer "+testToken+"\n")
-	write(t, filepath.Join(runDir, "ssh-keys"), "7\n")
+	box := fakeBox("acme.api")
+	write(t, filepath.Join(box.run, "auth"), "Authorization: Bearer "+testToken+"\n")
+	write(t, filepath.Join(box.run, "ssh-keys"), "7\n")
 	bin := t.TempDir()
 	write(t, filepath.Join(bin, "ss"), "#!/bin/sh\n"+`echo 'ESTAB 0 0 10.0.0.2:2222 10.0.0.9:51234 users:(("sshd",pid=812,fd=4))'`+"\n")
 	if err := os.Chmod(filepath.Join(bin, "ss"), 0o755); err != nil {
@@ -475,9 +479,9 @@ func TestABoxInUseOutlivesItsDeadlineUnlessItIsASpare(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	script := filepath.Join(t.TempDir(), "self-delete")
-	write(t, script, selfDeleteScript())
+	write(t, script, box.selfDeleteScript())
 	passed := time.Now().Unix() - 1
-	write(t, filepath.Join(runDir, "deadline"), strconv.FormatInt(passed, 10)+"\n")
+	write(t, filepath.Join(box.run, "deadline"), strconv.FormatInt(passed, 10)+"\n")
 	if out, err := exec.Command("bash", script).CombinedOutput(); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
@@ -485,8 +489,8 @@ func TestABoxInUseOutlivesItsDeadlineUnlessItIsASpare(t *testing.T) {
 		t.Fatalf("held and in use: the self-delete called %q and left the deadline %d s after the old one, want nothing called and 3600",
 			changes, readDeadline(t)-passed)
 	}
-	write(t, filepath.Join(runDir, "deadline"), strconv.FormatInt(passed, 10)+"\n")
-	write(t, filepath.Join(runDir, "spare"), "")
+	write(t, filepath.Join(box.run, "deadline"), strconv.FormatInt(passed, 10)+"\n")
+	write(t, filepath.Join(box.run, "spare"), "")
 	if out, err := exec.Command("bash", script).CombinedOutput(); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
@@ -502,7 +506,7 @@ func TestABoxCommandMovesItsHeldBoxsDeadlineOn(t *testing.T) {
 	p, _, _ := testPool(t)
 	at(t, p, created, time.Now())
 	b := claimed(t, p, "")
-	write(t, filepath.Join(runDir, "deadline"), strconv.FormatInt(time.Now().Unix()-1, 10)+"\n") // due now
+	write(t, filepath.Join(p.code.run, "deadline"), strconv.FormatInt(time.Now().Unix()-1, 10)+"\n") // due now
 	run(t, b, "true")
 	if got := readDeadline(t) - created.Unix(); got != 2*3600-300 {
 		t.Fatalf("after a box command 50 minutes into its first paid hour, the deadline is %d s after creation, want %d", got, 2*3600-300)
@@ -518,11 +522,11 @@ func TestABoxsScriptsRunWhereExecutingThemIsForbidden(t *testing.T) {
 	at(t, p, created, time.Now())
 	b := claimed(t, p, "")
 	for _, script := range []string{"rearm", "self-delete"} {
-		if err := os.Chmod(filepath.Join(runDir, script), 0o600); err != nil { // as a noexec mount refuses them
+		if err := os.Chmod(filepath.Join(p.code.run, script), 0o600); err != nil { // as a noexec mount refuses them
 			t.Fatal(err)
 		}
 	}
-	write(t, filepath.Join(runDir, "deadline"), strconv.FormatInt(time.Now().Unix()-1, 10)+"\n")
+	write(t, filepath.Join(p.code.run, "deadline"), strconv.FormatInt(time.Now().Unix()-1, 10)+"\n")
 	run(t, b, "true")
 	if got := readDeadline(t) - created.Unix(); got != 2*3600-300 {
 		t.Fatalf("after a box command, the deadline is %d s after creation, want %d: rearm didn't run", got, 2*3600-300)

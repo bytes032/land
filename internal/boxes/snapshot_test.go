@@ -75,7 +75,7 @@ func TestASnapshotIsBuiltAtTheGreenCommitAndReplacesTheOldOnlyOnceAvailable(t *t
 	f.api.creating = 2
 	var violations []string
 	f.api.imaged = func() {
-		for _, path := range []string{runDir, filepath.Join(os.Getenv("UNITS"), "land-self-delete.timer")} {
+		for _, path := range []string{p.code.run, filepath.Join(os.Getenv("UNITS"), "land-self-delete.timer")} {
 			if _, err := os.Stat(path); err == nil {
 				violations = append(violations, path)
 			}
@@ -90,7 +90,7 @@ func TestASnapshotIsBuiltAtTheGreenCommitAndReplacesTheOldOnlyOnceAvailable(t *t
 	if heads := f.lines(t, "heads", ""); len(heads) == 0 || slices.ContainsFunc(heads, func(h string) bool { return h != green }) {
 		t.Fatalf("crabbox ran from checkouts at %q; want each at the green commit %s", heads, green)
 	}
-	if data, err := os.ReadFile(filepath.Join(p.build, "stages")); err != nil || string(data) != "set up\nprepared\nwarmed it's here\n" {
+	if data, err := os.ReadFile(filepath.Join(p.code.build, "stages")); err != nil || string(data) != "set up\nprepared\nwarmed it's here\n" {
 		t.Fatalf("the box ran %q, %v; want the green commit's setup, then prepare and warm", data, err)
 	}
 	if len(violations) > 0 {
@@ -136,7 +136,7 @@ func TestASnapshotAtHeadIsBuiltAtHeadsCommitWithItsConfiguration(t *testing.T) {
 	if heads := f.lines(t, "heads", ""); len(heads) == 0 || slices.ContainsFunc(heads, func(h string) bool { return h != head }) {
 		t.Fatalf("crabbox ran from checkouts at %q; want each at HEAD %s", heads, head)
 	}
-	if data, err := os.ReadFile(filepath.Join(p.build, "stages")); err != nil || string(data) != "the branch setup\n" {
+	if data, err := os.ReadFile(filepath.Join(p.code.build, "stages")); err != nil || string(data) != "the branch setup\n" {
 		t.Fatalf("the box ran %q, %v; want HEAD's setup", data, err)
 	}
 	if _, images := f.api.changed(); len(images) != 1 || images[0].Labels["commit"] != head {

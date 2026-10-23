@@ -14,7 +14,6 @@ import (
 
 	"github.com/bytes032/land/internal/config"
 	"github.com/bytes032/land/internal/proc"
-	"github.com/bytes032/land/internal/stage"
 	"github.com/bytes032/land/internal/verdict"
 )
 
@@ -28,115 +27,25 @@ const (
 	deadlineLabel = "land-deadline"
 )
 
-// deadline is when a spare released at now deletes itself: 5 minutes before the next hour Hetzner bills for the server
-// created at created, Hetzner billing a server's lifetime rounded up to whole hours.
-func deadline(created, now time.Time) time.Time {
-	return created.Add(now.Sub(created).Truncate(time.Hour) + time.Hour - 5*time.Minute)
-}
-
-// runDir holds a box's self-delete: in /run, in memory, so that no snapshot of the box's disk carries it, and none
-// outlives a reboot, after which the sweep is the backstop. Tests move it, and the metadata service, elsewhere.
-var (
-	runDir      = "/run/land"
-	metadataURL = "http://169.254.169.254/hetzner/v1/metadata"
-)
-
-// selfDelete is the shell that gives the server its self-delete, and what it reads on stdin: the Hetzner token, which
-// never enters an argument list, and so no process listing. A timer runs selfDeleteScript every minute; the box starts
-// as a held box, its deadline set by rearm.
-func (p *pool) selfDelete(ctx context.Context, id int64) (install, stdin string, err error) {
+// selfDeleteOf is what makes the self-delete of the box whose server is id.
+func (p *pool) selfDeleteOf(ctx context.Context, id int64) (selfDelete, error) {
 	token := os.Getenv("HCLOUD_TOKEN")
 	if token == "" {
-		return "", "", errors.New("HCLOUD_TOKEN, the Hetzner project's API token, isn't set")
+		return selfDelete{}, errors.New("HCLOUD_TOKEN, the Hetzner project's API token, isn't set")
 	}
 	s, err := p.hz.server(ctx, id)
 	if err != nil {
-		return "", "", err
+		return selfDelete{}, err
 	}
 	keys, err := p.hz.keys(ctx, s)
-	if err != nil {
-		return "", "", err
-	}
-	var ids []string
-	for _, k := range keys {
-		ids = append(ids, strconv.FormatInt(k, 10))
-	}
-	return stopSelfDelete + `
-sudo rm -rf ` + runDir + `
-sudo install -d -m 700 ` + runDir + `
-sudo sh -c 'umask 077; cat >` + runDir + `/auth'
-echo ` + quote(strings.Join(ids, " ")) + ` | sudo tee ` + runDir + `/ssh-keys >/dev/null
-echo ` + strconv.FormatInt(s.Created.Unix(), 10) + ` | sudo tee ` + runDir + `/created >/dev/null
-sudo tee ` + runDir + `/self-delete >/dev/null <<'LAND'
-` + selfDeleteScript() + `LAND
-sudo tee ` + runDir + `/rearm >/dev/null <<'LAND'
-` + rearmScript() + `LAND
-sudo chmod 600 ` + runDir + `/self-delete ` + runDir + `/rearm
-sudo bash ` + runDir + `/rearm
-sudo systemd-run --quiet --collect --unit land-self-delete --on-calendar '*:*:00' /bin/bash ` + runDir + `/self-delete
-`, "Authorization: Bearer " + token + "\n", nil
+	return selfDelete{token: token, created: s.Created, keys: keys}, err
 }
 
-// selfDeleteScript is what a box's timer runs as root every minute: once the box's deadline has passed, it deletes the
-// SSH key crabbox registered for its lease and then its own server, which it finds through Hetzner's metadata service.
-// A held box someone is connected to (a box command running, a tunnel open) stays into its next paid hour instead: its
-// deadline moves an hour on. A spare's deadline never moves; the sweep reads it from the server's label.
-func selfDeleteScript() string {
-	return `#!/bin/bash
-set -eu
-dir=` + runDir + `
-[ -s $dir/deadline ] && [ "$(date +%s)" -ge "$(cat $dir/deadline)" ] || exit 0
-if [ ! -e $dir/spare ] && ss -Htnp state established 2>/dev/null | grep -q sshd; then
-  echo $(( $(cat $dir/deadline) + 3600 )) >$dir/deadline
-  exit 0
-fi
-id=$(curl -fsS --max-time 10 ` + metadataURL + `/instance-id)
-for key in $(cat $dir/ssh-keys); do
-  curl -fsS --max-time 30 -o /dev/null -X DELETE -H @$dir/auth ` + hetznerAPI + `/ssh_keys/$key || true
-done
-curl -fsS --max-time 30 -o /dev/null -X DELETE -H @$dir/auth ` + hetznerAPI + `/servers/$id
-`
-}
-
-// rearmScript is what sets a held box's deadline, as root, when the box is made, taken over, and after each box
-// command: 5 minutes before the first of its paid hours to end at least 15 minutes from now, so that a held box nobody
-// uses ends as a spare does, before the next hour Hetzner bills, and the SSH connection crabbox keeps open for 10
-// minutes after a command has closed by then. It leaves a spare's deadline alone.
-func rearmScript() string {
-	return `#!/bin/bash
-set -eu
-dir=` + runDir + `
-[ ! -e $dir/spare ] || exit 0
-created=$(cat $dir/created) now=$(date +%s)
-deadline=$(( created + ((now - created) / 3600 + 1) * 3600 - 300 ))
-while [ $deadline -lt $(( now + 900 )) ]; do deadline=$(( deadline + 3600 )); done
-echo $deadline >$dir/deadline
-`
-}
-
-// stopSelfDelete stops a box's self-delete timer and unloads it and its service, so that a new one can take the name.
-const stopSelfDelete = `sudo systemctl stop land-self-delete.timer land-self-delete.service 2>/dev/null || true
-sudo systemctl reset-failed land-self-delete.timer land-self-delete.service 2>/dev/null || true`
-
-// stripSelfDelete removes a box's self-delete, so that no snapshot carries it, nor the box deletes itself meanwhile.
-func stripSelfDelete() string {
-	return stopSelfDelete + "\nsudo rm -rf " + runDir
-}
-
-// setDeadline makes the box a spare with the deadline $1, in Unix seconds: two commands, so that under set -e a box
-// that lost its self-delete fails at the first, and without it the second fails too.
-func setDeadline() string {
-	return `echo "$1" | sudo tee ` + runDir + `/deadline >/dev/null
-sudo touch ` + runDir + `/spare`
-}
-
-// disarm readies the box c, which the worktree holds and which may still be a spare, for the worktree: it makes it a
-// held box again, its deadline the held one, stops its warm-up, every process in its unit, before crabbox copies the
-// worktree there, removes its deadline label and, only then, the deadline from its record.
+// disarm readies the box c, which the worktree holds and which may still be a spare, for the worktree: it disarms the
+// box before crabbox copies the worktree there, then removes its deadline label and, only then, the deadline from its
+// record.
 func (p *pool) disarm(ctx context.Context, c claim) error {
-	script := `sudo rm -f ` + runDir + `/spare && sudo bash ` + runDir + `/rearm && { sudo systemctl stop land-warm 2>/dev/null || true; } &&
-! systemctl is-active --quiet land-warm`
-	if err := p.crabbox(ctx, c.Box, p.stderr, p.stderr, "run", "--id", c.Lease, "--reclaim", "--no-sync", "--", "bash", "-c", script); err != nil {
+	if err := p.crabbox(ctx, c.Box, p.stderr, p.stderr, "run", "--id", c.Lease, "--reclaim", "--no-sync", "--", "bash", "-c", p.code.disarm()); err != nil {
 		return err
 	}
 	if err := p.hz.label(ctx, c.Server, deadlineLabel, ""); err != nil {
@@ -148,22 +57,6 @@ func (p *pool) disarm(ctx context.Context, c claim) error {
 		}
 		return nil
 	})
-}
-
-// warmStart, run on a box once crabbox has copied the green commit there, sets the spare's deadline, $1, and starts
-// its warm-up in a systemd unit, as the box's user in a login shell: the box script, box, around warm, leaving the exit
-// code in .git/land-warm. Both are in the script crabbox uploads, not its arguments, so crabbox doesn't print them. A
-// claim stops the unit, every process in it. Any step that fails stops it, and with it the release, which then stops
-// the box: one whose self-delete a reboot wiped holds no deadline. systemd leaves the command line as it is, for bash
-// to expand its ${…} and $$ in the box's environment.
-func warmStart(box, warm string) string {
-	return "set -e\nbox=" + quote(box) + "\nwarm=" + quote(warm) + "\n" + setDeadline() + `
-cd -P .
-sudo systemctl stop land-warm 2>/dev/null || true
-rm -f .git/land-warm
-sudo systemd-run --quiet --collect --expand-environment=no --unit land-warm --uid "$(id -u)" --gid "$(id -g)" \
-  --working-directory "$PWD" \
-  bash -lc '` + stage.Bash + ` "$1" land ` + stage.Bash + ` "$2" land; echo $? >.git/land-warm' land "$box" "$warm"`
 }
 
 // spare makes the box c, which the worktree releases, a spare: it sets its deadline, 5 minutes before its next paid
@@ -180,7 +73,7 @@ func (p *pool) spare(ctx context.Context, c claim) (time.Time, error) {
 	d := deadline(s.Created, released)
 	switch end := s.Created.Add(lifetime); {
 	case !d.After(released.Add(spareMargin)):
-		return time.Time{}, fmt.Errorf("its paid hour ends at %s", d.Add(5*time.Minute).Local().Format(time.TimeOnly))
+		return time.Time{}, fmt.Errorf("its paid hour ends at %s", d.Add(paidLead).Local().Format(time.TimeOnly))
 	case end.Sub(d) < leaseLeft:
 		return time.Time{}, fmt.Errorf("its lease ends at %s", end.Local().Format(time.TimeOnly))
 	}
@@ -211,7 +104,7 @@ func (p *pool) spare(ctx context.Context, c claim) (time.Time, error) {
 			return time.Time{}, err
 		}
 	} else if err := p.crabbox(ctx, c.Box, p.stderr, p.stderr, "run", "--id", c.Lease, "--reclaim", "--no-sync", "--",
-		"bash", "-c", setDeadline(), "land", unix); err != nil {
+		"bash", "-c", p.code.arm(d)); err != nil {
 		return time.Time{}, err
 	}
 	if err := p.hz.label(ctx, c.Server, deadlineLabel, unix); err != nil {
@@ -290,12 +183,13 @@ func (p *pool) checkout(ctx context.Context, box, commit string, f func(q *pool)
 	return f(&q)
 }
 
-// startWarm copies the pool's checkout of commit to the box c and starts its warm-up there, with the commit's own
-// prepare, warm and box.env, after setting the box's deadline, unix. It returns the box's SSH command, which outlives
-// the checkout, crabbox's claim of the lease names.
+// startWarm copies the pool's checkout of commit to the box c and starts its warm-up there (warmStart), with the
+// commit's own prepare, warm and box.env, after setting the box's deadline, unix. It returns the box's SSH command,
+// which outlives the checkout, crabbox's claim of the lease names.
 func (p *pool) startWarm(ctx context.Context, c claim, commit, unix string) (string, error) {
 	fmt.Fprintf(p.stderr, "land: warming %s at %.12s\n", c.Lease, commit)
-	if err := p.crabboxIn(ctx, c.Box, strings.NewReader(warmStart(p.script(p.cfg.Stages.Prepare), p.cfg.Stages.Warm)), p.stderr, p.stderr,
+	start := p.code.warmStart(p.cfg.Box.Env, p.cfg.Stages.Prepare, p.cfg.Stages.Warm)
+	if err := p.crabboxIn(ctx, c.Box, strings.NewReader(start), p.stderr, p.stderr,
 		"run", "--id", c.Lease, "--reclaim", "--script-stdin", "--", unix); err != nil {
 		return "", err
 	}
@@ -320,8 +214,9 @@ func background(dir string, args ...string) error {
 
 const warmUsage = "usage: land boxes warm REPO LEASE RELEASED COMMIT REFRESH SSH (release starts it)"
 
-// warmMain is `land boxes warm REPO LEASE RELEASED COMMIT REFRESH SSH`, the background half of a release.
-func warmMain(ctx context.Context, args []string) error {
+// warmMain is `land boxes warm REPO LEASE RELEASED COMMIT REFRESH SSH`, the background half of a release, on boxes
+// whose box code box gives.
+func warmMain(ctx context.Context, args []string, box func(repo string) boxCode) error {
 	if len(args) != 6 {
 		return errors.New(warmUsage)
 	}
@@ -333,7 +228,7 @@ func warmMain(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	p, err := poolOf(ctx, args[0], "", nil)
+	p, err := poolOf(ctx, args[0], "", nil, box)
 	if err != nil {
 		return err
 	}
@@ -344,8 +239,7 @@ func warmMain(ctx context.Context, args []string) error {
 // spare is warm, which a claim takes first, and when refresh is true, no other box is being imaged and the repository's
 // snapshot is stale, the spare is imaged into its new snapshot (refresh). It touches no spare a claim took meanwhile.
 func (p *pool) warm(ctx context.Context, lease string, released time.Time, commit string, refresh bool, ssh string) error {
-	code, err := p.onBox(ctx, ssh, `while systemctl is-active --quiet land-warm; do sleep 10; done
-cat `+quote(p.build)+`/.git/land-warm 2>/dev/null || true`, "")
+	code, err := p.onBox(ctx, ssh, p.code.warmWait(), "")
 	if err != nil {
 		return fmt.Errorf("waiting for the warm-up of %s: %w", lease, err)
 	}
@@ -388,14 +282,14 @@ cat `+quote(p.build)+`/.git/land-warm 2>/dev/null || true`, "")
 // its self-delete, which comes back after with its deadline, whether or not the snapshot was made.
 func (p *pool) refresh(ctx context.Context, c claim, commit, ssh string) error {
 	fmt.Fprintf(p.stderr, "land: refreshing the snapshot from %s\n", c.Lease)
-	_, err := p.onBox(ctx, ssh, stripSelfDelete()+"; sync", "")
+	_, err := p.onBox(ctx, ssh, p.code.strip(), "")
 	if err == nil {
 		_, err = p.image(ctx, c.Server, commit)
 	}
-	install, token, restoreErr := p.selfDelete(context.WithoutCancel(ctx), c.Server)
+	s, restoreErr := p.selfDeleteOf(context.WithoutCancel(ctx), c.Server)
 	if restoreErr == nil {
-		_, restoreErr = p.onBox(context.WithoutCancel(ctx), ssh,
-			install+`set -- `+strconv.FormatInt(c.Deadline.Unix(), 10)+"\n"+setDeadline(), token)
+		script, stdin := p.code.restore(s, c.Deadline)
+		_, restoreErr = p.onBox(context.WithoutCancel(ctx), ssh, script, stdin)
 	}
 	return errors.Join(err, restoreErr)
 }
