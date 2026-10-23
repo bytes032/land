@@ -37,10 +37,38 @@ type server struct {
 }
 
 type image struct {
-	ID      int64             `json:"id"`
-	Status  string            `json:"status"` // creating, then available
-	Created time.Time         `json:"created"`
-	Labels  map[string]string `json:"labels"`
+	ID       int64             `json:"id"`
+	Status   string            `json:"status"` // creating, then available
+	Created  time.Time         `json:"created"`
+	Labels   map[string]string `json:"labels"`
+	DiskSize float64           `json:"disk_size"` // GB: a server's disk must be at least as big to boot it
+}
+
+// serverType is a Hetzner server type: what a server of it has, its hourly price in each location, and where Hetzner
+// sells it now.
+type serverType struct {
+	Name         string         `json:"name"`
+	Architecture string         `json:"architecture"` // x86 or arm
+	CPUType      string         `json:"cpu_type"`     // shared or dedicated
+	Cores        int            `json:"cores"`
+	Memory       float64        `json:"memory"`      // GB
+	Disk         float64        `json:"disk"`        // GB
+	Deprecation  *struct{}      `json:"deprecation"` // nil until Hetzner deprecates the type
+	Prices       []typePrice    `json:"prices"`
+	Locations    []typeLocation `json:"locations"`
+}
+
+type typePrice struct {
+	Location string `json:"location"`
+	Hourly   struct {
+		Gross string `json:"gross"` // euros, VAT included
+	} `json:"price_hourly"`
+}
+
+type typeLocation struct {
+	Name        string `json:"name"`
+	Available   bool   `json:"available"` // false while Hetzner has none to sell there
+	Recommended bool   `json:"recommended"`
 }
 
 // apiError is the API's refusal: its status, code and message, never the request's headers.
@@ -103,12 +131,16 @@ func (h hetzner) do(ctx context.Context, method, path string, body, out any) err
 	return nil
 }
 
-// list GETs every page of a listing, path with its query, and returns the items under key.
+// list GETs every page of a listing, path with its query, if any, and returns the items under key.
 func list[T any](ctx context.Context, h hetzner, path, key string) ([]T, error) {
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
 	var all []T
 	for page := 1; page > 0; {
 		var reply map[string]json.RawMessage
-		if err := h.do(ctx, http.MethodGet, fmt.Sprintf("%s&per_page=50&page=%d", path, page), nil, &reply); err != nil {
+		if err := h.do(ctx, http.MethodGet, fmt.Sprintf("%s%sper_page=50&page=%d", path, sep, page), nil, &reply); err != nil {
 			return nil, err
 		}
 		var items []T
@@ -130,6 +162,11 @@ func list[T any](ctx context.Context, h hetzner, path, key string) ([]T, error) 
 // servers are the project's crabbox servers, those labelled crabbox=true, from every page of the listing.
 func (h hetzner) servers(ctx context.Context) ([]server, error) {
 	return list[server](ctx, h, "/servers?label_selector="+url.QueryEscape("crabbox=true"), "servers")
+}
+
+// serverTypes are Hetzner's server types, from every page of the listing.
+func (h hetzner) serverTypes(ctx context.Context) ([]serverType, error) {
+	return list[serverType](ctx, h, "/server_types", "server_types")
 }
 
 // slugged are the IDs of the project's crabbox servers labelled slug. The labels are checked again here, so a listing

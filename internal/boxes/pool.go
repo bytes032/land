@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net/http"
 	"os"
 	"path"
@@ -332,13 +333,13 @@ func (s *state) byLease(lease string) *claim {
 	return nil
 }
 
-// spare is the spare of typ a claim takes, warm before not, then the one with the most time left; never one being
-// imaged, nor one about to delete itself, nor a pending box or a snapshot's.
-func (s *state) spare(typ string, now time.Time) *claim {
+// spare is the spare a claim takes of a type fits accepts, warm before not, then the one with the most time left;
+// never one being imaged, nor one about to delete itself, nor a pending box or a snapshot's.
+func (s *state) spare(fits func(typ string) bool, now time.Time) *claim {
 	var best *claim
 	for i := range s.Claims {
 		c := &s.Claims[i]
-		if c.Worktree != "" || c.Lease == "" || c.Snapshot || c.Type != typ || c.Imaging || !c.Deadline.After(now.Add(spareMargin)) {
+		if c.Worktree != "" || c.Lease == "" || c.Snapshot || !fits(c.Type) || c.Imaging || !c.Deadline.After(now.Add(spareMargin)) {
 			continue
 		}
 		if best == nil || c.Warm != "" && best.Warm == "" ||
@@ -349,11 +350,16 @@ func (s *state) spare(typ string, now time.Time) *claim {
 	return best
 }
 
-// claim returns the worktree's box: the one it holds, else a spare, else a new box from the repository's newest
-// snapshot, the last two of typ, or box.type when typ is "". A worktree holding a box of another type than a typ it
-// asks for is refused, so that it never holds two boxes. A box it holds whose deadline may still be armed, a spare it
-// just took or a box a takeover or release left so, is disarmed first, or deleted, so that no box deletes itself
-// under its worktree.
+// take makes the spare h the worktree's: from now on, its deadline recorded until the box no longer has it.
+func (p *pool) take(h *claim) {
+	*h = claim{Box: h.Box, Worktree: p.root, Lease: h.Lease, Slug: h.Slug, Type: h.Type, Server: h.Server, Deadline: h.Deadline}
+}
+
+// claim returns the worktree's box: the one it holds, else a spare of the type it asks for, typ, or box.type when typ
+// is "", else a new box from the repository's newest snapshot, or what create gets instead when Hetzner sells none of
+// the type (round). A worktree holding a box smaller than a typ it asks for is refused, so that it never holds two
+// boxes; a bigger one serves. A box it holds whose deadline may still be armed, a spare it just took or a box a
+// takeover or release left so, is disarmed first, or deleted, so that no box deletes itself under its worktree.
 func (p *pool) claim(ctx context.Context, typ string) (*box, error) {
 	want := cmp.Or(typ, p.cfg.Box.Type)
 	if want == "" {
@@ -378,9 +384,8 @@ func (p *pool) claim(ctx context.Context, typ string) (*box, error) {
 		if err := p.locked(ctx, func(s *state, _ map[string]string) error {
 			h := s.held(p.root)
 			if h == nil {
-				if h = s.spare(want, p.now()); h != nil {
-					// The worktree's from now on, its deadline recorded until the box no longer has it.
-					*h = claim{Box: h.Box, Worktree: p.root, Lease: h.Lease, Slug: h.Slug, Type: h.Type, Server: h.Server, Deadline: h.Deadline}
+				if h = s.spare(func(t string) bool { return t == want }, p.now()); h != nil {
+					p.take(h)
 				}
 			}
 			if h != nil {
@@ -392,10 +397,17 @@ func (p *pool) claim(ctx context.Context, typ string) (*box, error) {
 		}
 		switch {
 		case held.Lease == "":
-			return p.claimNew(ctx, want)
+			c, err := p.claimNew(ctx, want)
+			if err != nil {
+				return nil, err
+			}
+			held = c
 		case typ != "" && held.Type != typ:
-			return nil, fmt.Errorf("this worktree holds %s, a %s: `land boxes release` it before asking for a %s", held.Lease, held.Type, typ)
-		case held.Deadline.IsZero():
+			if err := p.serves(ctx, held, typ); err != nil {
+				return nil, err
+			}
+		}
+		if held.Deadline.IsZero() {
 			return &box{p, held}, nil
 		}
 		err := p.disarm(ctx, held)
@@ -411,24 +423,32 @@ func (p *pool) claim(ctx context.Context, typ string) (*box, error) {
 	}
 }
 
-// claimNew gives the worktree a new box of typ, from the repository's newest snapshot.
-func (p *pool) claimNew(ctx context.Context, typ string) (*box, error) {
-	id, unlock, err := p.newBox()
+// serves refuses the box held, which the worktree holds, to a claim asking for typ when it is smaller, with fewer cores
+// or less memory, so that the worktree never holds two boxes; a bigger one serves.
+func (p *pool) serves(ctx context.Context, held claim, typ string) error {
+	types, err := p.hz.serverTypes(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer unlock() // once create returns, the box's record is complete, or gone with the box
-	c, err := p.create(ctx, id, typ, p.snapshotImage, false)
+	asked, err := askable(types, typ)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return &box{p, c}, nil
+	if t, ok := typeNamed(types, held.Type); !ok || !atLeast(t, asked) {
+		return fmt.Errorf("this worktree holds %s, a %s, smaller than a %s: `land boxes release` it before asking for one",
+			held.Lease, held.Type, typ)
+	}
+	return nil
 }
 
-// snapshotImage is the image new boxes start from, the repository's newest snapshot of the moment (startable).
-func (p *pool) snapshotImage(ctx context.Context) (string, error) {
-	snapshot, err := p.startable(ctx)
-	return strconv.FormatInt(snapshot.ID, 10), err
+// claimNew gives the worktree a new box of typ, from the repository's newest snapshot, or what create gets instead.
+func (p *pool) claimNew(ctx context.Context, typ string) (claim, error) {
+	id, unlock, err := p.newBox()
+	if err != nil {
+		return claim{}, err
+	}
+	defer unlock() // once create returns, the box's record is complete, or gone with the box
+	return p.create(ctx, id, typ, false)
 }
 
 // drop ends the box c and forgets it.
@@ -500,13 +520,15 @@ func (p *pool) ignoreCaptures(ctx context.Context) error {
 	return os.WriteFile(exclude, append(data, "/.crabbox/\n"...), 0o644) //nolint:gosec // git's own file mode
 }
 
-// create creates the box box, whose new folder's lock the caller holds, of typ, from the image image names, a
-// snapshot's ID, or "" for crabbox's plain Ubuntu: for the worktree, or, with snapshot, to build a snapshot on. The
-// box's record comes first, pending, so that a box command finds whatever crabbox makes even if this one dies; it is
-// complete once create returns, or gone, with all the box made. While Hetzner refuses the box at the project's limit,
+// create creates the box box, whose new folder's lock the caller holds, of typ: for the worktree, from the repository's
+// newest snapshot of the moment, or, with snapshot, from crabbox's plain Ubuntu, to build a snapshot on. The box's
+// record comes first, pending, so that a box command finds whatever crabbox makes even if this one dies; it is complete
+// once create returns, or gone, with all the box made. When Hetzner refuses the box, create tries the others round
+// names in turn, and the worktree's box may be a spare it takes instead, box going. While Hetzner refuses them all,
 // create asks again every retryEvery for up to retryFor, saying once what Hetzner said and who holds the repository's
-// boxes, and naming the image again each time: a spare's refresh may have replaced the snapshot meanwhile.
-func (p *pool) create(ctx context.Context, box, typ string, image func(context.Context) (string, error), snapshot bool) (c claim, err error) {
+// boxes, and planning each round anew: what Hetzner sells where changes, and a spare's refresh may have replaced the
+// snapshot meanwhile.
+func (p *pool) create(ctx context.Context, box, typ string, snapshot bool) (c claim, err error) {
 	c = claim{Box: box, Slug: "land-" + box, Type: typ, Snapshot: snapshot}
 	if !snapshot {
 		c.Worktree = p.root
@@ -521,14 +543,15 @@ func (p *pool) create(ctx context.Context, box, typ string, image func(context.C
 	}()
 	start := p.now()
 	for attempt := 0; ; attempt++ {
-		img, err := image(ctx)
-		if err != nil {
-			return c, err
-		}
-		made, refusal, err := p.warmup(ctx, c, img)
+		made, refusal, err := p.round(ctx, c)
 		switch {
 		case err != nil:
 			return made, err
+		case refusal == "" && made.Box != box: // a spare, the worktree's now
+			if err := p.drop(ctx, c); err != nil {
+				fmt.Fprintf(p.stderr, "land: deleting %s: %v; the next box command tries again\n", c.Slug, err)
+			}
+			return made, nil
 		case refusal == "":
 			return made, p.withState(func(s *state) error {
 				if i := slices.IndexFunc(s.Claims, func(h claim) bool { return h.Box == box }); i >= 0 {
@@ -561,29 +584,118 @@ func (p *pool) create(ctx context.Context, box, typ string, image func(context.C
 	}
 }
 
+// round tries, once, each box create may get for the pending box c, in order, and returns the first it got, or, with
+// none, what Hetzner said to the first it refused. First come new boxes of the type asked for, c's, in each location
+// Hetzner sells it now, cheapest first, unless its disk is smaller than the snapshot's; for a worktree, then a spare of
+// a type at least as big (atLeast), and new boxes of a bigger type whose disk holds the snapshot, cheapest type and
+// location first. A snapshot's build gets only the first: its snapshot's disk is its box's, which must stay box.type's.
+// Hetzner refusing a box at the project's server limit refuses every later new box, and at its dedicated-core limit
+// every later dedicated one as big: round asks for none of them.
+func (p *pool) round(ctx context.Context, c claim) (claim, string, error) {
+	types, err := p.hz.serverTypes(ctx)
+	if err != nil {
+		return c, "", err
+	}
+	asked, err := askable(types, c.Type)
+	if err != nil {
+		return c, "", err
+	}
+	var snapshot image
+	img := "" // crabbox's plain Ubuntu, for a snapshot's build
+	if !c.Snapshot {
+		if snapshot, err = p.startable(ctx); err != nil {
+			return c, "", err
+		}
+		img = strconv.FormatInt(snapshot.ID, 10)
+	}
+	// What Hetzner said to the first box it refused, and where it refused the last; whether one was refused at the
+	// server limit, and the fewest cores of a dedicated one refused at the dedicated-core limit.
+	refusal, last := "", ""
+	full, dedicated := false, math.MaxInt
+	first := func(offers []offer) (claim, bool, error) {
+		for _, o := range offers {
+			if full || o.typ.CPUType == "dedicated" && o.typ.Cores >= dedicated {
+				continue
+			}
+			switch {
+			case o.typ.Name != asked.Name:
+				fmt.Fprintf(p.stderr, "land: no %s available: creating a %s in %s (€%.2f/h)\n", asked.Name, o.typ.Name, o.location, o.price)
+			case last != "":
+				fmt.Fprintf(p.stderr, "land: no %s available in %s: creating one in %s (€%.2f/h)\n", asked.Name, last, o.location, o.price)
+			default:
+				fmt.Fprintf(p.stderr, "land: creating a %s box in %s\n", asked.Name, o.location)
+			}
+			try := c
+			try.Type = o.typ.Name
+			made, refused, err := p.warmup(ctx, try, img, o.location)
+			if err != nil || refused == "" {
+				return made, true, err
+			}
+			refusal, last = cmp.Or(refusal, refused), o.location
+			full = full || strings.Contains(refused, "resource_limit_exceeded")
+			if strings.Contains(refused, "dedicated_core_limit") {
+				dedicated = min(dedicated, o.typ.Cores)
+			}
+		}
+		return c, false, nil
+	}
+	own := offers(asked)
+	if !c.Snapshot && asked.Disk < snapshot.DiskSize {
+		fmt.Fprintf(p.stderr, "land: a %s's %g GB disk can't boot the snapshot, made on a %g GB one\n", asked.Name, asked.Disk, snapshot.DiskSize)
+		own = nil
+	}
+	if made, done, err := first(own); done {
+		return made, "", err
+	}
+	if !c.Snapshot {
+		var spare claim
+		if err := p.withState(func(s *state) error {
+			fits := func(typ string) bool { t, ok := typeNamed(types, typ); return ok && atLeast(t, asked) }
+			if h := s.spare(fits, p.now()); h != nil {
+				p.take(h)
+				spare = *h
+			}
+			return nil
+		}); err != nil {
+			return c, "", err
+		}
+		if spare.Lease != "" {
+			if spare.Type != asked.Name {
+				fmt.Fprintf(p.stderr, "land: taking spare %s, a %s, for a %s\n", spare.Lease, spare.Type, asked.Name)
+			}
+			return spare, "", nil
+		}
+		if made, done, err := first(offers(bigger(types, asked, snapshot.DiskSize)...)); done {
+			return made, "", err
+		}
+	}
+	return c, cmp.Or(refusal, "none is available in any location"), nil
+}
+
 var (
 	leasedLine = regexp.MustCompile(`(?m)^leased (cbx_[0-9a-f]{12}) slug=(\S+) .*\bserver=(\d+)\b`)
 	readyLine  = regexp.MustCompile(`(?m)^ready .*\bworkroot=(/\S+)`)
-	// limitLine is crabbox's report of Hetzner refusing a server at one of the project's limits.
-	limitLine = regexp.MustCompile(`.*\b(resource_limit_exceeded|dedicated_core_limit)\b.*`)
+	// refusalLine is crabbox's report of Hetzner refusing a new server: none of its type to sell in its location, one
+	// of the project's limits, or a disk too small for its image.
+	refusalLine = regexp.MustCompile(`.*\b(resource_unavailable|server_type_not_available|location_not_available|` +
+		`resource_limit_exceeded|dedicated_core_limit|image disk is bigger than server type disk)\b.*`)
 )
 
-// warmup creates the pending box c from image with crabbox and readies it (setup), returning it with its lease, slug
-// and server, those crabbox printed even when it fails. Hetzner refusing it at the project's limit is no error: warmup
-// returns what Hetzner said.
-func (p *pool) warmup(ctx context.Context, c claim, image string) (claim, string, error) {
-	fmt.Fprintf(p.stderr, "land: creating a %s box\n", c.Type)
+// warmup creates the pending box c, of its type, in location, from image with crabbox and readies it (setup), returning
+// it with its lease, slug and server, those crabbox printed even when it fails. Hetzner refusing it (refusalLine) is no
+// error: warmup returns what Hetzner said.
+func (p *pool) warmup(ctx context.Context, c claim, image, location string) (claim, string, error) {
 	var stdout, stderr bytes.Buffer
-	err := proc.Run(ctx, p.crabboxSpec(c.Box, []string{"CRABBOX_HETZNER_IMAGE=" + image}, nil, &stdout, &stderr,
-		[]string{"warmup", "--slug", c.Slug, "--type", c.Type, "--ttl", leaseTTL, "--idle-timeout", leaseTTL}))
+	err := proc.Run(ctx, p.crabboxSpec(c.Box, []string{"CRABBOX_HETZNER_IMAGE=" + image, "CRABBOX_HETZNER_LOCATION=" + location},
+		nil, &stdout, &stderr, []string{"warmup", "--slug", c.Slug, "--type", c.Type, "--ttl", leaseTTL, "--idle-timeout", leaseTTL}))
 	leased, ready := leasedLine.FindStringSubmatch(stdout.String()), readyLine.FindStringSubmatch(stdout.String())
 	if leased != nil {
 		server, _ := strconv.ParseInt(leased[3], 10, 64) // \d+ that crabbox printed
 		c.Lease, c.Slug, c.Server = leased[1], leased[2], server
 	}
 	switch {
-	case err != nil && limitLine.MatchString(stderr.String()):
-		return c, strings.TrimSpace(limitLine.FindString(stderr.String())), nil
+	case err != nil && refusalLine.MatchString(stderr.String()):
+		return c, strings.TrimSpace(refusalLine.FindString(stderr.String())), nil
 	case err == nil && (leased == nil || ready == nil):
 		err = errors.New("crabbox warmup printed no leased or no ready line")
 	}

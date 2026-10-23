@@ -247,7 +247,7 @@ func TestAClaimTakesTheRightSpare(t *testing.T) {
 	} {
 		s := state{Claims: c.spares}
 		got := ""
-		if taken := s.spare("cpx42", now); taken != nil {
+		if taken := s.spare(func(typ string) bool { return typ == "cpx42" }, now); taken != nil {
 			got = taken.Lease
 		}
 		if got != c.want {

@@ -55,7 +55,7 @@ func onUbuntu(t *testing.T, version string) {
 	var keys []int64
 	t.Cleanup(func() { endAll(t, p, claim{Box: id, Server: c.Server}, keys) })
 
-	c, err = p.create(ctx, id, "cpx22", func(context.Context) (string, error) { return "", nil }, false)
+	c, err = p.create(ctx, id, "cpx22", true) // as a snapshot's build: from crabbox's plain Ubuntu, which os: names
 	if err != nil {
 		t.Fatalf("creating a box from ubuntu:%s: %v", version, err)
 	}

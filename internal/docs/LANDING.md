@@ -30,8 +30,9 @@ Your box runs every build and test; your Mac only edits files and runs git. With
   XDG_STATE_HOME='<box folder>/state' CRABBOX_MAX_TTL=24h crabbox tunnel --provider hetzner --id LEASE --local-port PORT PORT
   XDG_STATE_HOME='<box folder>/state' CRABBOX_MAX_TTL=24h crabbox cp --provider hetzner --id LEASE SANDBOX:/work/<owner>.<name>/PATH PATH
   ```
-- `land boxes claim --type TYPE` asks for another server type, only while the worktree holds no box or one of that
-  type; `land boxes release` gives the box up. A released box stays as a spare, warm at the green commit, for the rest
+- `land boxes claim --type TYPE` asks for another server type, only while the worktree holds no box or one at least as
+  big, in cores and memory; `land boxes types` lists the types a box may be, their prices and where Hetzner sells them
+  now. `land boxes release` gives the box up. A released box stays as a spare, warm at the green commit, for the rest
   of the hour already paid for, then deletes itself; a later claim may take it, with at least an hour of the box's
   24-hour lease left.
 - A box you hold but stop using deletes itself the same way: 5 minutes before a paid hour in which it ran no box
@@ -43,7 +44,13 @@ Your box runs every build and test; your Mac only edits files and runs git. With
 - land checks that a new box's image (the snapshot, or, for `land boxes snapshot`, the Ubuntu that `os:` in
   `.crabbox.yaml` names) has what land's box code needs, and refuses one that lacks any: it names all it lacks and
   deletes the box. Each land release is tested on crabbox's Ubuntu 24.04 and 26.04.
-- At Hetzner's server limit, a claim says once who holds the repository's boxes, then retries every 30 s for up to 3 h.
+- A claim takes a spare of the type it asks for, else a new box of it from each location Hetzner sells it in now,
+  cheapest first, else a spare of a bigger type, else a new box of the cheapest bigger type whose disk holds the
+  snapshot, and says so whenever it takes anything but the type where it first tried. A snapshot boots only on a disk
+  at least its own size, so a `box.type` with a smaller disk leaves more types to fall back to. Build caches compiled
+  for the build machine's exact CPU (`-march=native`, `target-cpu=native`) can fail on another type.
+- When Hetzner refuses every box, at the project's server limit or with none to sell, a claim says once who holds the
+  repository's boxes, then retries every 30 s for up to 3 h.
 
 ## Ready to land
 

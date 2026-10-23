@@ -2,8 +2,10 @@
 // around every command run there, spares, snapshots and the sweep.
 //
 // A released box stays as a spare, warming at the green commit, until 5 minutes before its next paid hour, when it
-// deletes itself; a claim takes a spare before it creates a box from the repository's newest snapshot. land calls
-// Hetzner's API itself to list and delete boxes, for snapshots, spares' deadlines and the sweep.
+// deletes itself; a claim takes a spare before it creates a box from the repository's newest snapshot. When Hetzner has
+// none of the type to sell, a claim takes it from another location, else a bigger type, a spare first, rather than
+// hold its agent up. land calls Hetzner's API itself to list and delete boxes, for server types, snapshots, spares'
+// deadlines and the sweep.
 //
 // Every box command needs HCLOUD_TOKEN, the API token of the Hetzner project the boxes live in, in the environment:
 // crabbox reads it there, land calls the API with it, and each box keeps it, in memory, to delete itself. land never
@@ -50,7 +52,7 @@ func (e *StageError) Error() string { return e.Stage + ": " + e.Err.Error() }
 func (e *StageError) Unwrap() error { return e.Err }
 
 // Claim returns the box the worktree at root holds, claiming one when it holds none. typ "" asks for no type: any box
-// the worktree holds, else a box of cfg.Box.Type; another refuses a box the worktree holds of another type.
+// the worktree holds, else a box of cfg.Box.Type; another refuses a box the worktree holds of a smaller type.
 func Claim(ctx context.Context, root string, cfg *config.Config, typ string) (Box, error) {
 	p, err := newPool(ctx, root, cfg)
 	if err != nil {
@@ -69,14 +71,14 @@ func Release(ctx context.Context, root string, cfg *config.Config) error {
 }
 
 const usage = "usage: land boxes claim [--type TYPE] | run [--type TYPE] -- CMD [ARGS...] | release | status | " +
-	"snapshot [--head] | sweep (with HCLOUD_TOKEN, the Hetzner project's API token, in the environment)"
+	"snapshot [--head] | types | sweep (with HCLOUD_TOKEN, the Hetzner project's API token, in the environment)"
 
 // Main is `land boxes …`: claim claims the worktree's box, run runs CMD on it at the build root and exits with CMD's
 // exit code, release releases it as a spare, and status names each of the repository's boxes and its lease, and prints
 // crabbox's own `tunnel` and `cp` commands for the worktree's box. --type asks for a server type other than box.type,
-// only of a worktree with no box or a box of that type. snapshot builds the repository's snapshot, --head at the
-// worktree's HEAD rather than the green commit, and sweep, the hourly backstop, deletes the project's boxes that should
-// be gone.
+// only of a worktree with no box or one at least as big. snapshot builds the repository's snapshot, --head at the
+// worktree's HEAD rather than the green commit; types lists the server types a box may be; and sweep, the hourly
+// backstop, deletes the project's boxes that should be gone.
 func Main(ctx context.Context, args []string) error {
 	if len(args) == 0 || len(args) > 1 && args[0] != "claim" && args[0] != "run" && args[0] != "warm" &&
 		!slices.Equal(args, []string{"snapshot", "--head"}) {
@@ -85,6 +87,8 @@ func Main(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "sweep": // in CI, for the whole project: no worktree
 		return sweep(ctx, hetzner{}, time.Now(), os.Stdout)
+	case "types":
+		return printTypes(ctx, hetzner{}, os.Stdout)
 	case "warm":
 		return warmMain(ctx, args[1:])
 	}
