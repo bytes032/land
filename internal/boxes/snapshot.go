@@ -130,7 +130,7 @@ func (p *pool) snapshot(ctx context.Context, head bool) error {
 		}
 	}()
 	return p.checkout(ctx, id, commit, func(q *pool) error {
-		made, err := p.create(ctx, id, q.cfg.Box.Type, func(context.Context) (string, error) { return "", nil }, true)
+		made, err := p.create(ctx, id, q.cfg.Box.Type, true)
 		if err != nil {
 			return err
 		}

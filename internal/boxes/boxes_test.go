@@ -25,14 +25,17 @@ import (
 // fakeCrabbox is crabbox 0.78.1, or the version in version, in direct Hetzner mode as land uses it, in the directory
 // $FAKE_CRABBOX: each call's arguments are a line of calls, and a line of envs with its XDG_STATE_HOME and TMPDIR after
 // a tab each; the project's servers are the lines of servers, one JSON object each, created at $FAKE_CREATED or now,
-// and its SSH keys the lines of keys, which the fake API reads too. warmup refuses as many boxes at the project's limit
-// as refuse holds, refuses an image the API deleted, a line of deleted-images, and adds the image it starts from to
-// images; it keeps the lease's claim, key pair and a temporary file where crabbox does, in the state and temporary
-// directories, registers the key and labels the server with the slug it is given, as crabbox does, and adds the lease
-// and slug to leases. ssh prints a command that runs the remote command here, so a box's workspaces are under work/;
-// run adds the commit its checkout holds to heads and runs its command in the lease's workspace. run fails while the
-// file unreachable exists, and ssh while sshfail does. It refuses calls not made for direct Hetzner with 24 h leases,
-// or not in a box's folder, and stop, cp and list, which newFake fails the test for.
+// and its SSH keys the lines of keys, which the fake API reads too. warmup adds its type and location,
+// CRABBOX_HETZNER_LOCATION, to attempts; it refuses as many boxes at the project's limit as refuse holds, a type
+// dedicated-limit lists at the project's dedicated-core limit, a type a line of sold-out names, alone or with the
+// location, as Hetzner refuses one it has none of to sell there, and an image the API deleted, a line of
+// deleted-images; it adds the image it starts from to images, keeps the lease's claim, key pair and a temporary file
+// where crabbox does, in the state and temporary directories, registers the key and labels the server with the slug it
+// is given, as crabbox does, and adds the lease and slug to leases. ssh prints a command that runs the remote command
+// here, so a box's workspaces are under work/; run adds the commit its checkout holds to heads and runs its command in
+// the lease's workspace. run fails while the file unreachable exists, and ssh while sshfail does. It refuses calls not
+// made for direct Hetzner with 24 h leases, or not in a box's folder, and stop, cp and list, which newFake fails the
+// test for.
 const fakeCrabbox = `#!/bin/sh
 state=$FAKE_CRABBOX
 if [ "$1" = --version ]; then cat "$state/version" 2>/dev/null || echo 0.78.1; exit; fi
@@ -48,19 +51,28 @@ case $XDG_STATE_HOME in */boxes/????????????/state) ;; *) echo "fake crabbox: XD
 printf '%s\t%s\t%s\n' "$*" "$XDG_STATE_HOME" "$TMPDIR" >>"$state/envs"
 case $1 in
 warmup)
+  while [ $# -gt 0 ]; do
+    case $1 in --slug) slug=$2; shift 2 ;; --type) type=$2; shift 2 ;; *) shift ;; esac
+  done
+  printf '%s %s\n' "$type" "$CRABBOX_HETZNER_LOCATION" >>"$state/attempts"
   refuse=$(cat "$state/refuse" 2>/dev/null || echo 0)
   if [ "$refuse" -gt 0 ]; then
     echo $((refuse - 1)) >"$state/refuse"
     echo 'crabbox: hetzner POST /servers: http 403: {"error":{"code":"resource_limit_exceeded","message":"server limit reached"}}' >&2
     exit 1
   fi
+  if grep -qx "$type" "$state/dedicated-limit" 2>/dev/null; then
+    echo "$type: hetzner POST /servers: http 403: {\"error\":{\"code\":\"dedicated_core_limit\",\"details\":{},\"message\":\"dedicated core limit reached\"}}" >&2
+    exit 1
+  fi
+  if grep -qxE "$type( $CRABBOX_HETZNER_LOCATION)?" "$state/sold-out" 2>/dev/null; then
+    echo "$type: hetzner POST /servers: http 412: {\"error\":{\"code\":\"resource_unavailable\",\"details\":{},\"message\":\"error during placement\"}}" >&2
+    exit 1
+  fi
   if grep -qx "${CRABBOX_HETZNER_IMAGE:-none}" "$state/deleted-images" 2>/dev/null; then
     echo 'crabbox: hetzner POST /servers: http 404: {"error":{"code":"not_found","message":"image not found"}}' >&2
     exit 1
   fi
-  while [ $# -gt 0 ]; do
-    case $1 in --slug) slug=$2; shift 2 ;; --type) type=$2; shift 2 ;; *) shift ;; esac
-  done
   lease=$(printf 'cbx_%012x' $$) key=crabbox-cbx-$(printf %012x $$)
   keys=$XDG_STATE_HOME/crabbox/testboxes/$lease
   mkdir -p "$keys" "$XDG_STATE_HOME/crabbox/claims" && echo "{}" >"$XDG_STATE_HOME/crabbox/claims/$lease.json" &&
@@ -141,15 +153,15 @@ type fake struct {
 }
 
 // newFake puts the stand-ins first on PATH, each recording its calls in $CALLS, serves a fake Hetzner API over the
-// fake crabbox's project with one available snapshot of acme.api, image 1, makes the boxes' build roots and self-delete
-// directories of the test's own, and gives the test a home of its own, so the claims are its own. It fails the test
-// if land runs crabbox stop, cp or list.
+// fake crabbox's project with one available snapshot of acme.api, image 1, and the server types fakeTypes, makes the
+// boxes' build roots and self-delete directories of the test's own, and gives the test a home of its own, so the
+// claims are its own. It fails the test if land runs crabbox stop, cp or list.
 func newFake(t *testing.T) *fake {
 	t.Helper()
 	f := &fake{dir: realDir(t)}
 	f.api = &fakeHetzner{servers: filepath.Join(f.dir, "servers"), keys: filepath.Join(f.dir, "keys"), made: time.Now(), images: []image{
 		{ID: 1, Status: "available", Created: time.Now().Add(-time.Hour), Labels: map[string]string{snapshotLabel: "acme.api", "commit": "old"}},
-	}}
+	}, types: slices.Clone(fakeTypes)}
 	api := httptest.NewServer(f.api)
 	t.Cleanup(api.Close)
 	t.Cleanup(func() {
@@ -279,17 +291,18 @@ func (f *fake) keys(t *testing.T) map[string]fakeKey {
 const testToken = "test-token-0123456789abcdef"
 
 // fakeHetzner is Hetzner's API over the fake crabbox's project, whose servers and SSH keys it reads from and writes to
-// its files of them, and over images, the snapshots: a listing of servers honours a label selector of key=value terms,
-// and pages of up to 50; a new snapshot stays creating for as many reads as creating says, created at made, then turns
-// available, or unavailable, failed, when failing is set; a deleted image is a line of the fake crabbox's
-// deleted-images, which no box boots any more. Every call that changes something is a line of changes, "METHOD /path",
-// and each read finding a new snapshot available is "available /images/ID". Every deletion fails while deleteFails is
-// set. imaged runs as a snapshot starts; the metadata service names instance.
+// its files of them, over images, the snapshots, and over types, the server types: a listing of servers honours a
+// label selector of key=value terms, and pages of up to 50; a new snapshot stays creating for as many reads as creating
+// says, created at made, then turns available, or unavailable, failed, when failing is set; a deleted image is a line
+// of the fake crabbox's deleted-images, which no box boots any more. Every call that changes something is a line of
+// changes, "METHOD /path", and each read finding a new snapshot available is "available /images/ID". Every deletion
+// fails while deleteFails is set. imaged runs as a snapshot starts; the metadata service names instance.
 type fakeHetzner struct {
 	mu          sync.Mutex
 	servers     string
 	keys        string
 	images      []image
+	types       []fakeType
 	creating    int
 	failing     bool
 	deleteFails bool
@@ -297,6 +310,46 @@ type fakeHetzner struct {
 	changes     []string
 	imaged      func()
 	instance    int64
+}
+
+// fakeType is a server type of the fake API's, priced price an hour in Europe and a third more in sin, and sold now
+// in the locations in.
+type fakeType struct {
+	name, arch, cpu string
+	cores           int
+	memory, disk    float64
+	price           float64
+	deprecated      bool
+	in              []string
+}
+
+// fakeLocations are the fake API's, of which Hetzner recommends hel1.
+var fakeLocations = []string{"fsn1", "nbg1", "hel1", "sin"}
+
+// fakeTypes are the fake API's server types, as Hetzner's, in no order of price: the tests' cpx42 and ccx63, and,
+// as big as a cpx42 or bigger, dearer x86 ones; a cheaper one whose disk is small, cx43; one Hetzner sells nowhere now,
+// cx53; an Arm one, cax41; and cpx51, which the fake has deprecated.
+var fakeTypes = []fakeType{
+	{"ccx63", "x86", "dedicated", 48, 192, 960, 1.9365, false, fakeLocations},
+	{"ccx43", "x86", "dedicated", 16, 64, 360, 0.6259, false, fakeLocations},
+	{"ccx33", "x86", "dedicated", 8, 32, 240, 0.3134, false, fakeLocations},
+	{"cpx62", "x86", "shared", 16, 32, 640, 0.2942, false, fakeLocations},
+	{"cpx42", "x86", "shared", 8, 16, 320, 0.1576, false, fakeLocations},
+	{"cpx51", "x86", "shared", 16, 32, 360, 0.1605, true, fakeLocations},
+	{"cax41", "arm", "shared", 16, 32, 320, 0.0932, false, fakeLocations},
+	{"cx53", "x86", "shared", 16, 32, 320, 0.0673, false, nil},
+	{"cx43", "x86", "shared", 8, 16, 160, 0.0355, false, fakeLocations},
+}
+
+// sell has Hetzner sell the type name now in the locations in, and nowhere else.
+func (f *fakeHetzner) sell(name string, in ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.types {
+		if f.types[i].name == name {
+			f.types[i].in = in
+		}
+	}
 }
 
 // fakeKey is an SSH key of the fake project's, with its fingerprint, which Hetzner computes.
@@ -450,6 +503,26 @@ func (f *fakeHetzner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.changes = append(f.changes, call)
 	case call == "GET /images":
 		reply(map[string]any{"images": f.images, "meta": page})
+	case call == "GET /server_types":
+		var types []map[string]any
+		for _, t := range f.types {
+			var prices, locations []map[string]any
+			for _, l := range fakeLocations {
+				price := t.price
+				if l == "sin" {
+					price = price * 4 / 3
+				}
+				prices = append(prices, map[string]any{"location": l, "price_hourly": map[string]string{"gross": strconv.FormatFloat(price, 'f', 16, 64)}})
+				locations = append(locations, map[string]any{"name": l, "available": slices.Contains(t.in, l), "recommended": l == "hel1"})
+			}
+			var deprecation any
+			if t.deprecated {
+				deprecation = map[string]string{"announced": "2026-01-01T00:00:00Z", "unavailable_after": "2026-04-01T00:00:00Z"}
+			}
+			types = append(types, map[string]any{"name": t.name, "architecture": t.arch, "cpu_type": t.cpu, "cores": t.cores,
+				"memory": t.memory, "disk": t.disk, "deprecation": deprecation, "prices": prices, "locations": locations})
+		}
+		reply(map[string]any{"server_types": types, "meta": page})
 	case r.Method == http.MethodGet && parts[0] == "images" && j >= 0:
 		if f.images[j].Status == "creating" {
 			switch {
@@ -677,10 +750,10 @@ func TestAWorktreeKeepsItsBoxAndOthersGetTheirOwn(t *testing.T) {
 	}
 }
 
-// --type works only on a worktree with no box or a box of that type, so a worktree never holds two boxes, while a
-// claim asking for no type, as the landing's does, takes whatever box the worktree holds; a spare of another type is
-// no box of the type asked for.
-func TestTypeOnlyOnAWorktreeWithNoBoxOrOneOfThatType(t *testing.T) {
+// --type works only on a worktree with no box or a box at least as big, in cores and memory, so a worktree never
+// holds two boxes: its ccx63 serves a claim of a cpx42, its cpx42 never one of a ccx63. A claim asking for no type, as
+// the landing's does, takes whatever box the worktree holds; a spare of a smaller type is no box of the type asked for.
+func TestTypeOnlyOnAWorktreeWithNoBoxOrOneAsBig(t *testing.T) {
 	f := newFake(t)
 	p, _, _ := testPool(t)
 	small := claimed(t, p, "")
@@ -692,8 +765,10 @@ func TestTypeOnlyOnAWorktreeWithNoBoxOrOneOfThatType(t *testing.T) {
 	if big.c.Type != "ccx63" {
 		t.Fatalf("a worktree with no box got a %s, want the ccx63 it asked for", big.c.Type)
 	}
-	if b := claimed(t, other, ""); b.c.Lease != big.c.Lease {
-		t.Fatalf("a claim asking for no type got %+v, not the worktree's ccx63 %s", b.c, big.c.Lease)
+	for _, typ := range []string{"", "cpx42"} {
+		if b := claimed(t, other, typ); b.c.Lease != big.c.Lease {
+			t.Fatalf("a claim asking for %q got %+v, not the worktree's ccx63 %s", typ, b.c, big.c.Lease)
+		}
 	}
 	if err := p.release(t.Context()); err != nil {
 		t.Fatal(err)
@@ -844,7 +919,7 @@ func TestStatusNamesTheLeaseAndASparesDeadline(t *testing.T) {
 }
 
 // `land boxes run` runs the command on the worktree's box and exits with its exit code; a failed prepare is its
-// stage's error instead; --type is refused on a worktree holding another type.
+// stage's error instead; --type is refused on a worktree holding a smaller type.
 func TestLandBoxesRun(t *testing.T) {
 	newFake(t)
 	root, _ := worktree(t)
