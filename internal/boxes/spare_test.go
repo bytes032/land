@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -349,6 +350,191 @@ func TestASpareWarmsAtTheGreenCommitAndRefreshesAStaleSnapshot(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(os.Getenv("UNITS"), "land-self-delete.timer")); err != nil {
 		t.Errorf("after the refresh, no self-delete timer: %v", err)
+	}
+}
+
+// warmed runs `land boxes warm` with started, the arguments release started it with, and returns what it said, which
+// release's background run of it leaves in the box's warm.log.
+func warmed(t *testing.T, started []string) string {
+	t.Helper()
+	out, err := os.Create(filepath.Join(t.TempDir(), "warm.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = out.Close() }()
+	stderr := os.Stderr
+	os.Stderr = out
+	err = boxesMain(t.Context(), started, fakeBox)
+	os.Stderr = stderr
+	said, readErr := os.ReadFile(out.Name())
+	if err != nil || readErr != nil {
+		t.Fatalf("land boxes %s: %v, %v\n%s", strings.Join(started, " "), err, readErr, said)
+	}
+	return string(said)
+}
+
+// imagesMade are the calls that started the project's snapshots so far, "POST /servers/ID/actions/create_image" each.
+func imagesMade(f *fake) []string {
+	changes, _ := f.api.changed()
+	return slices.DeleteFunc(changes, func(c string) bool { return !strings.HasSuffix(c, "/actions/create_image") })
+}
+
+// A spare whose warm-up failed, or was stopped, as a claim or a reboot stops it, leaving no exit code, isn't warm and
+// replaces no snapshot, stale as the snapshot is; the background half of its release says how the warm-up ended.
+func TestAWarmUpThatFailedOrStoppedMakesNoWarmSpare(t *testing.T) {
+	for _, c := range []struct {
+		name, warm string
+		stopped    bool
+		ended      string
+	}{
+		{"failed", "exit 3", false, "3"},
+		{"stopped", "echo warmed >warmed", true, "stopped"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake(t)
+			f.api.images[0].Created = time.Now().Add(-5 * time.Hour)
+			p, _ := greenWorld(t, testConfig+"  warm: "+c.warm+"\n", "")
+			var started []string
+			p.background = func(_ string, args ...string) error { started = args; return nil }
+			at(t, p, time.Now().Add(-10*time.Minute), time.Now())
+			b := claimed(t, p, "cpx42")
+			if err := p.release(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if c.stopped {
+				if err := os.Remove(filepath.Join(p.code.build, ".git", "land-warm")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if said, want := warmed(t, started), "land: the warm-up of "+b.c.Lease+" ended: "+c.ended+"\n"; said != want {
+				t.Errorf("land boxes warm said %q, want %q", said, want)
+			}
+			if spare := p.record(t, b.c.Lease); spare.Warm != "" || spare.Imaging {
+				t.Errorf("the spare after its warm-up %s: %+v; want it neither warm nor being imaged", c.name, spare)
+			}
+			if made := imagesMade(f); len(made) != 0 {
+				t.Errorf("the spare whose warm-up %s was imaged: %q", c.name, made)
+			}
+		})
+	}
+}
+
+// The background half of a release touches no spare a claim took meanwhile: neither while the claim's worktree holds
+// the box, nor once that worktree has released it again, when only the later release's warm-up makes it warm.
+func TestAWarmUpLeavesASpareAClaimTookMeanwhileAlone(t *testing.T) {
+	f := newFake(t)
+	f.api.images[0].Created = time.Now().Add(-5 * time.Hour)
+	p, green := greenWorld(t, testConfig+"  warm: echo warmed >warmed\n", "")
+	var started []string
+	p.background = func(_ string, args ...string) error { started = args; return nil }
+	created, now := time.Now().Add(-10*time.Minute), time.Now()
+	at(t, p, created, now)
+	b := claimed(t, p, "cpx42")
+	if err := p.release(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	first := started
+	if again := claimed(t, p, "cpx42"); again.c.Lease != b.c.Lease {
+		t.Fatalf("the claim got %s, not the spare %s", again.c.Lease, b.c.Lease)
+	}
+	warmed(t, first)
+	if held := p.record(t, b.c.Lease); held.Worktree != p.root || held.Warm != "" || held.Imaging || len(imagesMade(f)) != 0 {
+		t.Fatalf("the box the worktree holds again, after its release's warm-up: %+v, imaged %q", held, imagesMade(f))
+	}
+	at(t, p, created, now.Add(time.Minute))
+	if err := p.release(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	warmed(t, first)
+	if spare := p.record(t, b.c.Lease); spare.Warm != "" || spare.Imaging || len(imagesMade(f)) != 0 {
+		t.Fatalf("the spare released again, after the first release's warm-up: %+v, imaged %q", spare, imagesMade(f))
+	}
+	warmed(t, started)
+	if spare := p.record(t, b.c.Lease); spare.Warm != green || spare.Imaging || len(imagesMade(f)) != 1 {
+		t.Fatalf("the spare after its own release's warm-up: %+v, imaged %q; want it warm at %s and imaged", spare, imagesMade(f), green)
+	}
+}
+
+// A spare whose warm-up passed is warm, but replaces the repository's snapshot only when it is of box.type, whose disk
+// every new box has, the snapshot is stale, and the spare's deadline, which an image mustn't outlast, is at least 15
+// minutes away.
+func TestAWarmSpareReplacesOnlyAStaleSnapshotOfItsTypeInTime(t *testing.T) {
+	for _, c := range []struct {
+		name, typ string
+		age       time.Duration // the snapshot's
+		left      time.Duration // until the spare's deadline, at its release
+	}{
+		{"a spare of another type", "ccx63", 5 * time.Hour, 45 * time.Minute},
+		{"a young snapshot", "cpx42", time.Hour, 45 * time.Minute},
+		{"a deadline under 15 minutes away", "cpx42", 5 * time.Hour, 14 * time.Minute},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake(t)
+			f.api.images[0].Created = time.Now().Add(-c.age)
+			p, green := greenWorld(t, testConfig+"  warm: echo warmed >warmed\n", "")
+			var started []string
+			p.background = func(_ string, args ...string) error { started = args; return nil }
+			now := time.Now()
+			at(t, p, now.Add(c.left-55*time.Minute), now) // a box's first deadline is 55 minutes after its creation
+			b := claimed(t, p, c.typ)
+			if err := p.release(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			warmed(t, started)
+			if spare := p.record(t, b.c.Lease); spare.Warm != green || spare.Imaging {
+				t.Errorf("the spare after its warm-up: %+v; want it warm at %s", spare, green)
+			}
+			if made := imagesMade(f); len(made) != 0 {
+				t.Errorf("the spare was imaged: %q", made)
+			}
+		})
+	}
+}
+
+// One spare at a time replaces the repository's snapshot: a spare whose warm-up passes while another is being imaged
+// is warm, but no snapshot.
+func TestOneSpareAtATimeReplacesTheSnapshot(t *testing.T) {
+	f := newFake(t)
+	f.api.images[0].Created = time.Now().Add(-5 * time.Hour)
+	p, green := greenWorld(t, testConfig+"  warm: echo warmed >warmed\n", "")
+	dir := realDir(t)
+	git(t, p.root, "worktree", "add", "-q", "--detach", dir)
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _, _ := poolAt(t, dir, cfg) // another worktree of the repository
+	other.forge = p.forge
+	at(t, p, time.Now().Add(-10*time.Minute), time.Now())
+	other.now = p.now
+	started, spares := map[*pool][]string{}, map[*pool]claim{}
+	for _, w := range []*pool{p, other} {
+		w.background = func(_ string, args ...string) error { started[w] = args; return nil }
+		spares[w] = claimed(t, w, "cpx42").c
+	}
+	for _, w := range []*pool{p, other} {
+		if err := w.release(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var ran atomic.Bool
+	var theirs error
+	f.api.imaged = func() { // as p's spare starts its snapshot, the other's warm-up passes
+		if ran.CompareAndSwap(false, true) { // once: a snapshot the other starts itself starts while this runs
+			theirs = warmMain(t.Context(), started[other][1:], fakeBox)
+		}
+	}
+	warmed(t, started[p])
+	if theirs != nil {
+		t.Fatalf("the other spare's warm-up: %v", theirs)
+	}
+	if made, want := imagesMade(f), "POST /servers/"+strconv.FormatInt(spares[p].Server, 10)+"/actions/create_image"; !slices.Equal(made, []string{want}) {
+		t.Errorf("snapshots started %q, want %q alone", made, want)
+	}
+	for _, w := range []*pool{p, other} {
+		if spare := p.record(t, spares[w].Lease); spare.Warm != green || spare.Imaging {
+			t.Errorf("%s after the warm-ups: %+v; want it warm at %s", spares[w].Lease, spare, green)
+		}
 	}
 }
 

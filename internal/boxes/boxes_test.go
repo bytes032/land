@@ -304,8 +304,8 @@ const testToken = "test-token-0123456789abcdef"
 // says, created at made, then turns available, or unavailable, failed, when failing is set; a deleted image is a line
 // of the fake crabbox's deleted-images, which no box boots any more. Every call that changes something is a line of
 // changes, "METHOD /path", and each read finding a new snapshot available is "available /images/ID". Every deletion
-// fails while deleteFails is set. imaged runs as a snapshot starts; the metadata service names instance, unless
-// noMetadata is set, as off Hetzner.
+// fails while deleteFails is set. imaged runs as a snapshot starts, outside the fake's lock, so that what it runs may
+// call the API; the metadata service names instance, unless noMetadata is set, as off Hetzner.
 type fakeHetzner struct {
 	mu          sync.Mutex
 	servers     string
@@ -433,6 +433,9 @@ func (f *fakeHetzner) save(servers []server) error {
 }
 
 func (f *fakeHetzner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if f.imaged != nil && r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/actions/create_image") {
+		f.imaged()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if r.URL.Path == "/hetzner/v1/metadata/instance-id" {
@@ -555,9 +558,6 @@ func (f *fakeHetzner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Labels map[string]string `json:"labels"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if f.imaged != nil {
-			f.imaged()
-		}
 		made := image{ID: int64(100 + len(f.images)), Status: "available", Created: f.made, Labels: body.Labels}
 		f.changes = append(f.changes, call)
 		if f.creating > 0 {
