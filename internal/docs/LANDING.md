@@ -85,8 +85,10 @@ Write the commit message to a file, then run `land --message FILE`.
   and amended into the commit.
 - The check at the push runs on your box at the commit's exact tree: the checks your change selects (a check with
   `paths` runs only when a changed path starts with one; a check with `ignore` is skipped when every changed path ends
-  with one). The box stops before any check when its tree isn't the commit's. Its result and each check's log come
-  back to `.land/` in your worktree.
+  with one). The box stops before any check when its tree isn't the commit's. Checks run one after another in
+  `.land.yaml`'s order, except a check with `parallel: true`, which runs at the same time as the others; a failing
+  check stops none of the others, and each says how long it took. Its result and each check's log come back to
+  `.land/` in your worktree.
 - When it passes, land pushes the commit and marks it `success`, and your worktree ends at it. A failure, or a box that
   stopped before a verdict, pushes nothing and leaves your worktree at the squashed commit, before any regeneration:
   fix a failure, or after the box just land again, which needs no new review.

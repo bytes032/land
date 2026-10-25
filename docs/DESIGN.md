@@ -38,7 +38,7 @@ box: {type: cpx42, env: {}}
 stages:
   setup: <command>
   prepare: <command>
-  check: {lint: {run: <command>}, test: {run: <command>, ignore: [.md]}}
+  check: {lint: {run: <command>}, test: {run: <command>, ignore: [.md]}, e2e: {run: <command>, parallel: true}}
   regenerate: [{kind: lockfile, path: <path>, run: <command>}, {kind: derived, path: <path>, run: <command>}]
   warm: <command>
   review: land autoreview "$@" --max-priority P1
@@ -52,7 +52,7 @@ Each is a deep module behind a small interface. A seam is real only with two ada
 
 - **Landing flow** (`internal/landing`): message and trailer checks, clean start, `LANDING.md` drift check, base, review check, squash and rebase with regeneration, check, push and mark, lost race, `recheck`, unchecked landings.
 - **Change classifier** (`internal/classify`): from changed and conflicted paths, the checks to run, the regenerations (lockfiles first), the conflict policy, the review-key exclusions. Paths are prefixes and suffixes, never globs. A check with `paths` runs only when a changed path starts with one; one with `ignore` is skipped when every changed path ends with one of its suffixes. `lockfile` entries rerun when changed, stop land on conflict and stay in the review key; `derived` entries rerun when changed or conflicted, take the trunk's side and leave the key.
-- **Check** (`internal/check`): the box half runs the selected checks at the commit's tree and writes `.land/result.json`; the Mac half classifies it: the tree matches and every check passed → `success`; the tree matches and one failed → `failure` with its name, command and log tail; anything else → `error` naming the stage. No repository output format reaches the core.
+- **Check** (`internal/check`): the box half runs the selected checks at the commit's tree and writes `.land/result.json`; the Mac half classifies it: the tree matches and every check passed → `success`; the tree matches and one failed → `failure` with its name, command and log tail; anything else → `error` naming the stage. No repository output format reaches the core. Checks run one after another in the file's order; a check with `parallel: true` runs at the same time as them, the repository's word that it shares no writable folder with another check and writes no tracked file (cargo, for one, serializes or breaks on a shared `target/`). A failing check stops none of the others, and results come back in the file's order with each check's seconds. Each check leads a process group of its own, so whatever ends the box half ends every check still running, with all it started. A check killed for want of memory is the commit's `failure`: the box must fit its parallel checks at once.
 - **Verdict** (`internal/verdict`): the only interpreter of marks. A commit's mark is its newest `land` status from any account; it is verified when that is `success` and it has no `Unchecked:` trailer; the green commit is the newest verified commit among the trunk's 100 newest, else the tip. `land gate` polls it in CI and outputs `verified`.
 - **Forge** (`internal/forge`): set and list marks, comment, list and rerun the commit's CI runs, check an issue is open. GitHub over plain HTTP (token from `GH_TOKEN`, else `gh auth token`; `github.token` in Actions), and an in-memory adapter for tests.
 - **Boxes** (`internal/boxes`): see below.

@@ -37,8 +37,9 @@ type CheckResult struct {
 	Name    string `json:"name"`
 	Command string `json:"command"`
 	Exit    int    `json:"exit"`
-	Log     string `json:"log"` // repository-relative, fetched back with the result
-	Tail    string `json:"-"`   // the log's last lines, read on the Mac for a failed check
+	Seconds int    `json:"seconds"` // how long it ran
+	Log     string `json:"log"`     // repository-relative, fetched back with the result
+	Tail    string `json:"-"`       // the log's last lines, read on the Mac for a failed check
 }
 
 // Outcome is the check's classification.
@@ -55,11 +56,14 @@ const (
 	tailBytes = 4000
 )
 
-// script is the box half, run by bash at the box's repository root with the commit's tree, then each check's name
-// and command, as its arguments. It removes the last result first, then reads the tree the box holds as git would
-// commit it, and when that isn't the commit's tree, writes a result at stage "tree" and stops before any check.
-// Otherwise it runs every check, each under bash -eo pipefail -c to its own log, and writes each one's exit. It exits
-// 0 exactly when it wrote the result, whatever the checks did.
+// script is the box half, run by bash at the box's repository root with the commit's tree, then each check's name,
+// "parallel" or "serial", and command, as its arguments. It removes the last result first, then reads the tree the box
+// holds as git would commit it, and when that isn't the commit's tree, writes a result at stage "tree" and stops before
+// any check. Otherwise it starts every parallel check, then runs the others one at a time in order meanwhile, each
+// under bash -eo pipefail -c to its own log, waits for all, and writes each one's exit and seconds in the checks' order.
+// A failing check stops none of the others. Each check leads a process group of its own (bash's monitor mode), so when
+// the script ends, whatever ends it, every check still running goes, with all it started. It exits 0 exactly when it
+// wrote the result, whatever the checks did.
 // shortcut: a file the repository tracks though .gitignore ignores it never enters the box's index, so its commit
 // fails the tree check; force-add such paths here if a repository ever tracks one.
 const script = `set -u
@@ -89,18 +93,45 @@ if [ "$found" != "$tree" ]; then
 	result tree ''
 	exit
 fi
-checks= i=0
-while [ $# -ge 2 ]; do
-	i=$((i + 1)) name=$1 run=$2
-	shift 2
-	code=0
-	` + stage.Bash + ` "$run" land > ".land/$i.log" 2>&1 < /dev/null || code=$?
+# check I NAME COMMAND runs check I to its log, says how it went and how long it took, and leaves its exit and seconds
+# in .land/I.exit.
+check() {
+	local code=0 start=$SECONDS took
+	` + stage.Bash + ` "$3" land > ".land/$1.log" 2>&1 < /dev/null || code=$?
+	took=$((SECONDS - start))
 	if [ "$code" = 0 ]; then
-		echo "land: check $name passed" >&2
+		echo "land: check $2 passed in ${took}s" >&2
 	else
-		echo "land: check $name failed with exit $code; its log is .land/$i.log" >&2
+		echo "land: check $2 failed with exit $code in ${took}s; its log is .land/$1.log" >&2
 	fi
-	checks+="${checks:+,}{\"name\":$(json "$name"),\"command\":$(json "$run"),\"exit\":$code,\"log\":\".land/$i.log\"}"
+	echo "$code $took" > ".land/$1.exit"
+}
+groups=()
+trap 'for g in ${groups[@]+"${groups[@]}"}; do kill -TERM -- "-$g" 2>/dev/null; done' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 141' PIPE
+trap 'exit 143' TERM
+# start I NAME COMMAND starts check I in a process group of its own.
+start() {
+	set -m
+	check "$@" &
+	set +m
+	groups+=("$!")
+}
+args=("$@") n=$(($# / 3))
+for ((i = 1; i <= n; i++)); do
+	if [ "${args[3 * i - 2]}" = parallel ]; then start "$i" "${args[3 * i - 3]}" "${args[3 * i - 1]}"; fi
+done
+for ((i = 1; i <= n; i++)); do
+	if [ "${args[3 * i - 2]}" != parallel ]; then start "$i" "${args[3 * i - 3]}" "${args[3 * i - 1]}" && wait "$!"; fi
+done
+wait
+groups=()
+checks=
+for ((i = 1; i <= n; i++)); do
+	read -r code took < ".land/$i.exit" || exit
+	checks+="${checks:+,}{\"name\":$(json "${args[3 * i - 3]}"),\"command\":$(json "${args[3 * i - 1]}"),\"exit\":$code,\"seconds\":$took,\"log\":\".land/$i.log\"}"
 done
 result check "$checks"
 `
@@ -115,7 +146,11 @@ func Run(ctx context.Context, box boxes.Box, root, tree string, checks []config.
 	}
 	argv := []string{"bash", "-c", script, "land", tree}
 	for _, c := range checks {
-		argv = append(argv, c.Name, c.Run)
+		mode := "serial"
+		if c.Parallel {
+			mode = "parallel"
+		}
+		argv = append(argv, c.Name, mode, c.Run)
 	}
 	if err := box.Run(ctx, []string{Dir}, argv...); err != nil {
 		if ctx.Err() != nil {

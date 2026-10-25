@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/bytes032/land/internal/boxes"
 	"github.com/bytes032/land/internal/check"
@@ -18,7 +20,7 @@ import (
 
 // box is a fake box: dir, a scratch repository, stands for the box's copy of the worktree. Run runs the command there
 // for real, unless skip is set, then copies each fetch path back over root's, symlinks as symlinks, as a box command
-// does, and returns err.
+// does, and returns err. A ctx ending the run ends the command with SIGTERM.
 type box struct {
 	dir, root string
 	skip      bool
@@ -30,6 +32,8 @@ func (b *box) Run(ctx context.Context, fetch []string, argv ...string) error {
 	if !b.skip {
 		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.Dir, cmd.Stderr = b.dir, os.Stderr
+		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+		cmd.WaitDelay = 10 * time.Second
 		ran = cmd.Run()
 	}
 	for _, path := range fetch {
@@ -115,6 +119,79 @@ func TestRunClassifiesEveryCheck(t *testing.T) {
 	git(t, b.root, "init", "-q")
 	if status := git(t, b.root, "status", "--porcelain", "--untracked-files=all"); status != "" {
 		t.Errorf("git sees the result on the Mac: %q", status)
+	}
+}
+
+// A parallel check runs at the same time as the others, which still run one at a time in the file's order; a failing
+// parallel check fails alone, with its own log, while the others run to their end; results come back in the file's
+// order. Each check waits for the other's mark, so checks run one at a time would fail rather than pass slowly.
+func TestAParallelCheckRunsAlongsideTheOthers(t *testing.T) {
+	b, tree := newBox(t, map[string]string{"a.txt": "a\n"})
+	waitFor := func(file string) string {
+		return "for i in $(seq 200); do [ -e " + file + " ] && break; sleep 0.05; done; [ -e " + file + " ]"
+	}
+	lint := config.Check{Name: "lint", Run: "touch lint.ran && " + waitFor("side.ran") + " && touch lint-done.ran"}
+	after := config.Check{Name: "after", Run: "[ -e lint-done.ran ] && touch after.ran"}
+	side := config.Check{Name: "side", Run: "touch side.ran && " + waitFor("lint.ran"), Parallel: true}
+	got, err := check.Run(t.Context(), b, b.root, tree, []config.Check{side, lint, after})
+	if err != nil || got.State != forge.Success || got.Detail != "The check at the push passed: side, lint, after" {
+		t.Fatalf("a parallel check beside two in order: %+v, %v; want success, in the file's order", got, err)
+	}
+	for _, f := range []string{"lint.ran", "side.ran", "lint-done.ran", "after.ran"} {
+		if err := os.Remove(filepath.Join(b.dir, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	side.Run += " && exit 4"
+	got, err = check.Run(t.Context(), b, b.root, tree, []config.Check{side, lint, after})
+	if err != nil || got.State != forge.Failure || len(got.Failed) != 1 {
+		t.Fatalf("a failing parallel check: %+v, %v; want a failure", got, err)
+	}
+	if f := got.Failed[0]; f.Name != "side" || f.Exit != 4 || f.Log != ".land/1.log" {
+		t.Errorf("the failed check is %+v; want side, exit 4, .land/1.log", f)
+	}
+	if !exists(filepath.Join(b.dir, "after.ran")) {
+		t.Error("the checks in order didn't run to their end beside a failing parallel check")
+	}
+}
+
+// When the box half ends before its checks do, every check still running goes with it, the parallel ones and the one
+// running in order alike, with what they started: none keeps writing on the box under the next command.
+func TestEveryCheckGoesWithTheBoxHalf(t *testing.T) {
+	b, tree := newBox(t, map[string]string{"a.txt": "a\n"})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	pids := []string{filepath.Join(b.dir, "par.ran"), filepath.Join(b.dir, "ser.ran")}
+	go func() {
+		for !exists(pids[0]) || !exists(pids[1]) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	checks := []config.Check{
+		{Name: "ser", Run: "echo $$ > ser.ran.tmp && mv ser.ran.tmp ser.ran && exec sleep 60"},
+		{Name: "par", Run: "echo $$ > par.ran.tmp && mv par.ran.tmp par.ran && exec sleep 60", Parallel: true},
+	}
+	if _, err := check.Run(ctx, b, b.root, tree, checks); err == nil {
+		t.Fatal("a box half ended midway gave no error")
+	}
+	for _, file := range pids {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pid int
+		if _, err := fmt.Sscan(string(data), &pid); err != nil {
+			t.Fatal(err)
+		}
+		for start := time.Now(); syscall.Kill(pid, 0) == nil; time.Sleep(50 * time.Millisecond) {
+			if time.Since(start) > 5*time.Second {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				t.Errorf("%s's check, process %d, outlived the box half", filepath.Base(file), pid)
+				break
+			}
+		}
 	}
 }
 

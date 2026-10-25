@@ -77,9 +77,12 @@ type Check struct {
 	Paths []string `yaml:"paths"`
 	// Ignore are suffixes: the check is skipped when the change is non-empty and every changed path ends with one.
 	Ignore []string `yaml:"ignore"`
+	// Parallel runs the check at the same time as the other checks, which run one after another in the file's order:
+	// the repository's word that it shares no writable folder with them and writes no tracked file.
+	Parallel bool `yaml:"parallel"`
 }
 
-// Checks are the check stage's entries in the order the file lists them, the order they run in.
+// Checks are the check stage's entries in the order the file lists them, the order they run in and report in.
 type Checks []Check
 
 // UnmarshalYAML reads a mapping of check names to checks, keeping its order. Each check is decoded as strictly as the
