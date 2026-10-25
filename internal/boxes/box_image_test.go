@@ -110,10 +110,13 @@ echo $(( $(sudo cat `+dir+`/deadline) - passed ))`, "")
 		t.Fatalf("a box in use, its deadline passed, moved it %q s on, %v; want 3600", out, err)
 	}
 
-	// Its deadline passed again, and its user's sessions ended, crabbox's connection among them, the box is idle.
+	// Its user's sessions ended, crabbox's connection and this script's own among them, and only then its deadline
+	// passed again, the box is idle. Passing the deadline first would race the self-delete's minute tick: a tick
+	// while this script is still connected rightly keeps the box another hour.
 	if _, err := p.onBox(ctx, ssh, `set -eu
-echo $(( $(date +%s) - 1 )) | sudo tee `+dir+`/deadline >/dev/null
-sudo systemd-run --quiet --on-active=3 loginctl terminate-user "$(id -un)"`, ""); err != nil {
+user=$(id -un)
+sudo systemd-run --quiet --on-active=3 /bin/bash -c "loginctl terminate-user $user && sleep 5 &&
+  echo \$(( \$(date +%s) - 1 )) >`+dir+`/deadline"`, ""); err != nil {
 		t.Fatal(err)
 	}
 	for start := time.Now(); ; {
